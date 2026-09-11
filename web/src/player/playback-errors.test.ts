@@ -14,6 +14,8 @@ describe("describePlanTerminal", () => {
     ).toEqual({
       title: "Transcoding is disabled",
       message: "Transcoding is disabled for your user. Ask your server administrator for access.",
+      reason: "transcoding_disabled",
+      retryable: false,
     });
   });
 
@@ -28,6 +30,8 @@ describe("describePlanTerminal", () => {
       title: "Audio transcoding is disabled",
       message:
         "This item requires audio conversion, but audio transcoding is disabled for your user.",
+      reason: "audio_transcoding_disabled",
+      retryable: false,
     });
   });
 
@@ -43,6 +47,8 @@ describe("describePlanTerminal", () => {
       title: "That subtitle track can't be used",
       message:
         "The selected subtitle must be burned into the video, but 4K transcoding is disabled.",
+      reason: "subtitle_conversion_unsupported",
+      retryable: false,
     });
   });
 
@@ -57,6 +63,8 @@ describe("describePlanTerminal", () => {
       title: "That subtitle track can't be used",
       message:
         "Silo couldn't prepare the selected subtitles for this device. Try a different track.",
+      reason: "subtitle_codec_unsupported",
+      retryable: false,
     });
   });
 
@@ -70,6 +78,8 @@ describe("describePlanTerminal", () => {
     ).toEqual({
       title: "No playable version found",
       message: "A lower-resolution source is required because 4K transcoding is disabled.",
+      reason: "no_alternate_version",
+      retryable: false,
     });
   });
 
@@ -80,6 +90,8 @@ describe("describePlanTerminal", () => {
       title: "No playable version found",
       message:
         "Silo couldn't find a way to play this file on this device. Try another version if one is available.",
+      reason: "no_alternate_version",
+      retryable: false,
     });
   });
 
@@ -94,6 +106,8 @@ describe("describePlanTerminal", () => {
       title: "No playable version found",
       message:
         "Silo couldn't find a way to play this file on this device. Try another version if one is available.",
+      reason: "adaptation_exhausted",
+      retryable: false,
     });
   });
 
@@ -107,6 +121,8 @@ describe("describePlanTerminal", () => {
     ).toEqual({
       title: "Playback unavailable",
       message: "Failed to start the playback transport.",
+      reason: "transcode_start_failed",
+      retryable: true,
     });
   });
 
@@ -120,6 +136,38 @@ describe("describePlanTerminal", () => {
     ).toEqual({
       title: "Playback unavailable",
       message: "The server couldn't start converting this file. Please try again.",
+      reason: "transcode_node_unavailable",
+      retryable: true,
+    });
+  });
+
+  it("exposes the retry verdict of a virtual source that could not be resolved", () => {
+    expect(
+      describePlanTerminal({
+        reason: "virtual_source_unavailable",
+        message: "The virtual source could not be resolved for playback.",
+        retryable: true,
+      }),
+    ).toEqual({
+      title: "Playback unavailable",
+      message: "The virtual source could not be resolved for playback.",
+      reason: "virtual_source_unavailable",
+      retryable: true,
+    });
+  });
+
+  it("falls back to a generic sentence when a virtual source failure carries no message", () => {
+    expect(
+      describePlanTerminal({
+        reason: "virtual_source_unavailable",
+        message: "  ",
+        retryable: true,
+      }),
+    ).toEqual({
+      title: "Playback unavailable",
+      message: "The virtual source could not be resolved for playback.",
+      reason: "virtual_source_unavailable",
+      retryable: true,
     });
   });
 
@@ -133,6 +181,8 @@ describe("describePlanTerminal", () => {
     ).toEqual({
       title: "Playback unavailable",
       message: "A newer server explained this precisely.",
+      reason: "some_future_reason",
+      retryable: false,
     });
   });
 
@@ -142,6 +192,8 @@ describe("describePlanTerminal", () => {
     ).toEqual({
       title: "Playback unavailable",
       message: "Silo could not start playback.",
+      reason: "some_future_reason",
+      retryable: false,
     });
   });
 });

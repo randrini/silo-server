@@ -22,6 +22,7 @@ import {
   type FailureV3,
   type PlanV3,
   type RouteEventNameV3,
+  type StartRequestV3,
   type SubtitleInventoryItemV3,
 } from "../protocol-v3";
 import {
@@ -85,6 +86,15 @@ interface PlaybackSessionState {
   pendingSwitchFileId: number | null;
   errorTitle: string | null;
   error: string | null;
+  /**
+   * The v3 terminal reason behind `errorTitle`/`error`, when the error came
+   * from a server decision rather than a transport failure.
+   */
+  errorReason: string | null;
+  /** The server's retry verdict for the current error, false when unnamed. */
+  errorRetryable: boolean;
+  /** True while a viewer-initiated retry of a refused start is in flight. */
+  retrying: boolean;
   initialSubtitleErrorTitle: string | null;
   initialSubtitleError: string | null;
 }
@@ -92,11 +102,22 @@ interface PlaybackSessionState {
 interface PlaybackSessionErrorState {
   title: string;
   message: string;
+  reason?: string;
+  retryable?: boolean;
 }
+
+/** A start body plus the optional force-relink flag the retry path adds. */
+type StartRequestWithForceRelinkV3 = StartRequestV3 & { force_relink?: boolean };
 
 export interface UsePlaybackSessionResult extends PlaybackSessionState {
   /** Starts a fresh session against another file (edition/version switch). */
   switchVersion: (fileId: number, currentPosition: number) => void;
+  /**
+   * Re-issues the start request for the file whose start was refused with a
+   * retryable terminal, forcing a fresh release relist. No-op while a retry is
+   * already in flight or once a plan is playing.
+   */
+  retryStart: () => void;
   /** `track_change` replan selecting another audio track by combined index. */
   switchAudioTrack: (index: number, currentPosition: number) => void;
   /**
@@ -256,6 +277,9 @@ function planToSessionState(
     pendingSwitchFileId: null,
     errorTitle: null,
     error: null,
+    errorReason: null,
+    errorRetryable: false,
+    retrying: false,
     initialSubtitleErrorTitle: null,
     initialSubtitleError: null,
   };
@@ -363,6 +387,9 @@ export function usePlaybackSession(
     pendingSwitchFileId: null,
     errorTitle: null,
     error: null,
+    errorReason: null,
+    errorRetryable: false,
+    retrying: false,
     initialSubtitleErrorTitle: null,
     initialSubtitleError: null,
   });
@@ -390,6 +417,16 @@ export function usePlaybackSession(
   // the completion handler starts the switch to it immediately.
   const pendingSwitchFileIdRef = useRef<number | null>(null);
   const loadSequenceRef = useRef(0);
+  // The start that produced the current terminal, so a retry can re-issue it
+  // against the same file with the viewer's original position and selection.
+  const retryTargetRef = useRef<{
+    fileId: number;
+    position: number;
+    forceStartPosition: boolean;
+    fileSelection: "auto" | "explicit";
+    carriedAudioTrackId: string | null;
+  } | null>(null);
+  const retryingRef = useRef(false);
 
   // v3 identity. `playback_attempt_id` spans one whole attempt chain (a start
   // and every replan that follows it); `plan_attempt_id` identifies the single
@@ -532,6 +569,8 @@ export function usePlaybackSession(
           pendingSwitchFileId: null,
           errorTitle: failure.title,
           error: failure.message,
+          errorReason: failure.reason ?? null,
+          errorRetryable: failure.retryable ?? false,
         }));
         return false;
       }
@@ -598,7 +637,7 @@ export function usePlaybackSession(
       fileSelection: "auto" | "explicit",
       forceRelink?: boolean,
     ): Promise<DecisionResponseV3> => {
-      const body = buildStartRequestV3({
+      const body: StartRequestWithForceRelinkV3 = buildStartRequestV3({
         extraClientFeatures: VIDEO_CLIENT_FEATURES_V3,
         fileId: targetFileId,
         profileId: config.getProfileId() ?? "",
@@ -620,6 +659,11 @@ export function usePlaybackSession(
         clientCapabilities,
         clientPlaybackContext,
       });
+      // force_relink asks the server to re-query the provider and drop a stale
+      // virtual-source pin; without it a retry replays the cached candidate.
+      if (forceRelink) {
+        body.force_relink = true;
+      }
 
       return playerFetch<DecisionResponseV3>(config, "/playback/start", {
         method: "POST",
@@ -719,8 +763,8 @@ export function usePlaybackSession(
        * server-side version substitution. */
       fileSelection?: "auto" | "explicit";
       /** When true, the server should force a re-link/re-query of the virtual
-       * file on this start attempt. Only set when the viewer explicitly picks
-       * an unavailable version. */
+       * file on this start attempt. Set when the viewer explicitly picks an
+       * unavailable version, or by the retry path after a no-streams terminal. */
       forceRelink?: boolean;
     }) => {
       const previousState = stateRef.current;
@@ -748,6 +792,8 @@ export function usePlaybackSession(
         replanningQuality: false,
         errorTitle: hasExistingSession ? current.errorTitle : null,
         error: hasExistingSession ? current.error : null,
+        errorReason: hasExistingSession ? current.errorReason : null,
+        errorRetryable: hasExistingSession ? current.errorRetryable : false,
         initialSubtitleErrorTitle: hasExistingSession ? current.initialSubtitleErrorTitle : null,
         initialSubtitleError: hasExistingSession ? current.initialSubtitleError : null,
       }));
@@ -786,6 +832,8 @@ export function usePlaybackSession(
           pendingSwitchFileId: null,
           errorTitle: nextError?.title ?? current.errorTitle,
           error: nextError?.message ?? current.error,
+          errorReason: nextError ? (nextError.reason ?? null) : current.errorReason,
+          errorRetryable: nextError?.retryable ?? current.errorRetryable,
         }));
       };
 
@@ -795,6 +843,14 @@ export function usePlaybackSession(
         if (!selectedFileId) {
           throw new Error("No playable version found");
         }
+        // Remember what to re-issue if this start ends in a retryable terminal.
+        retryTargetRef.current = {
+          fileId: selectedFileId,
+          position,
+          forceStartPosition,
+          fileSelection: fileSelection ?? "auto",
+          carriedAudioTrackId: carriedAudioTrackId ?? null,
+        };
 
         const decision = await requestStart(
           selectedFileId,
@@ -875,6 +931,8 @@ export function usePlaybackSession(
             pendingSwitchFileId: null,
             errorTitle: previousState.errorTitle,
             error: previousState.error,
+            errorReason: previousState.errorReason,
+            errorRetryable: previousState.errorRetryable,
           }));
           return;
         }
@@ -1069,6 +1127,8 @@ export function usePlaybackSession(
           replanningQuality: false,
           errorTitle: "Playback failed",
           error: "Playback failed after repeated recovery attempts.",
+          errorReason: null,
+          errorRetryable: false,
         }));
         return false;
       }
@@ -1111,6 +1171,8 @@ export function usePlaybackSession(
         replanningQuality: isQualityReplan,
         errorTitle: null,
         error: null,
+        errorReason: null,
+        errorRetryable: false,
       }));
 
       try {
@@ -1174,6 +1236,8 @@ export function usePlaybackSession(
           replanningQuality: false,
           errorTitle: nextError.title,
           error: nextError.message,
+          errorReason: nextError.reason ?? null,
+          errorRetryable: nextError.retryable ?? false,
         }));
         return false;
       } finally {
@@ -1504,9 +1568,52 @@ export function usePlaybackSession(
     [loadSession],
   );
 
+  /**
+   * Re-issues the start that was refused with a retryable terminal.
+   *
+   * The retry differs from the original in one way: `force_relink` asks the
+   * server to re-query the provider for the virtual source instead of replaying
+   * the candidate it already had. A fresh attempt id is minted by `loadSession`
+   * so the server cannot answer the retry from start idempotency. Double-taps
+   * are ignored while a retry is in flight; a retry also refuses to disturb a
+   * plan that is already playing.
+   */
+  const retryStart = useCallback(() => {
+    if (retryingRef.current) return;
+    if (planRef.current) return;
+    const target = retryTargetRef.current;
+    if (!target) return;
+
+    retryingRef.current = true;
+    setState((current) => ({
+      ...current,
+      retrying: true,
+      errorTitle: null,
+      error: null,
+      errorReason: null,
+      errorRetryable: false,
+    }));
+
+    void loadSession({
+      preferredFileId: target.fileId,
+      position: target.position,
+      forceStartPosition: target.forceStartPosition,
+      allowPreserveExistingSessionOnError: false,
+      replacementErrorMessage: "Failed to retry playback",
+      initialErrorMessage: "Failed to retry playback",
+      carriedAudioTrackId: target.carriedAudioTrackId,
+      fileSelection: target.fileSelection,
+      forceRelink: true,
+    }).finally(() => {
+      retryingRef.current = false;
+      setState((current) => (current.retrying ? { ...current, retrying: false } : current));
+    });
+  }, [loadSession]);
+
   return {
     ...state,
     switchVersion,
+    retryStart,
     switchAudioTrack,
     changeSubtitleTrack,
     changeQuality,

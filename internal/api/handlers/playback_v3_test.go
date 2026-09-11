@@ -4717,6 +4717,110 @@ func TestHandleReplanPlaybackV3SidecarChangeReusesCopyHLSTransport(t *testing.T)
 	}
 }
 
+// TestHandleReplanPlaybackV3SeekReanchorReusesCopyHLSTransport verifies that a
+// seek reanchor with an identical recipe and route keeps the active HLS
+// generation. The segment layer restarts FFmpeg in place for targets past the
+// produced head; rebuilding the transport here would add a teardown/respawn and
+// (for virtual sources) a provider re-resolution that the seek did not need.
+func TestHandleReplanPlaybackV3SeekReanchorReusesCopyHLSTransport(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	file.Container = "mkv"
+	file.FilePath = writePlaybackTestMediaFile(t, "movie.mkv")
+	file.ExternalSubtitles = []models.ExternalSubtitle{
+		{Path: writePlaybackTestMediaFile(t, "movie.de.srt"), Language: "de", Format: "srt"},
+	}
+	manager := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(manager, testPlaybackFileResolver{file: file})
+	handler.PlaybackConfig = playbackTestConfig(writePlaybackTestFFmpeg(t), t.TempDir())
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3(nil))
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"allow_4k_transcode": "true"}}
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+
+	startRequest := v3HandlerStartRequest()
+	startRequest.Capabilities.Containers = []string{"m3u8"}
+	startRequest.ClientPlaybackContext.Deliveries = map[string]playback.DeliveryCapabilityV3{
+		playback.DeliveryClassHLSV3: {
+			Enabled: true, SupportedOnDevice: true,
+			Subtitles: playback.DeliverySubtitleCapabilitiesV3{SidecarText: true},
+		},
+	}
+	german := 0
+	startRequest.SubtitleTrackID = playback.TrackIDV3(file.ID, "subtitle", german)
+	startRequest.SubtitleTrackIndex = &german
+	startRR := httptest.NewRecorder()
+	handler.HandleStartPlayback(startRR, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, startRequest))).WithContext(newAuthorizedPlaybackContext()))
+	var started playback.DecisionResponseV3
+	if startRR.Code != http.StatusCreated || json.Unmarshal(startRR.Body.Bytes(), &started) != nil || started.PlaybackPlan == nil {
+		t.Fatalf("start status=%d body=%s", startRR.Code, startRR.Body.String())
+	}
+	if started.PlaybackPlan.Delivery != playback.DeliveryRemuxHLSV3 {
+		t.Fatalf("start plan = %#v, want copy HLS", started.PlaybackPlan)
+	}
+	before := handler.tm.GetTranscodeSession(started.SessionID)
+	if before == nil {
+		t.Fatal("start created no local HLS transport")
+	}
+	t.Cleanup(func() { handler.tm.CloseTranscodeSession(started.SessionID, "") })
+	beforeOpts := before.Opts()
+	beforeTimeline := started.PlaybackPlan.Timeline
+	beforeURL := started.PlaybackPlan.Stream.URL
+	beforeGeneration := before.SegmentGeneration()
+	before.ReportSegmentDownloaded(25)
+	beforeRequested := before.LastRequestedSegment()
+
+	replanned := postPlaybackReplanV3(t, handler, started.SessionID, playback.ReplanRequestV3{
+		ProtocolVersion:       playback.ProtocolV3,
+		Operation:             playback.ReplanOperationSeekReanchorV3,
+		PlaybackAttemptID:     startRequest.PlaybackAttemptID,
+		ReplanRequestID:       "seek-reanchor-reuse-0001",
+		FailedPlanID:          started.PlaybackPlan.PlanID,
+		PlanAttemptID:         "seek-reanchor-plan-attempt-0001",
+		PlanAttemptKey:        started.PlaybackPlan.PlanAttemptKey,
+		AttemptCount:          1,
+		QualityPreference:     startRequest.QualityPreference,
+		PositionSeconds:       120,
+		SelectedTracks:        started.PlaybackPlan.SelectedTracks,
+		Capabilities:          startRequest.Capabilities,
+		ClientPlaybackContext: startRequest.ClientPlaybackContext,
+	})
+	if replanned.PlaybackPlan == nil {
+		t.Fatalf("seek reanchor returned no plan: outcome=%s terminal=%+v", replanned.Outcome, replanned.Terminal)
+	}
+	after := handler.tm.GetTranscodeSession(started.SessionID)
+	if after != before {
+		t.Fatalf("seek reanchor rebuilt the HLS transport: before=%p after=%p", before, after)
+	}
+	if !after.IsRunning() {
+		t.Fatal("seek reanchor stopped the active HLS transport")
+	}
+	if after.SegmentGeneration() != beforeGeneration {
+		t.Fatalf("seek reanchor restarted FFmpeg: generation %d -> %d", beforeGeneration, after.SegmentGeneration())
+	}
+	if afterOpts := after.Opts(); afterOpts.OutputDir != beforeOpts.OutputDir || afterOpts.SeekSeconds != beforeOpts.SeekSeconds || afterOpts.StartSegmentNumber != beforeOpts.StartSegmentNumber {
+		t.Fatalf("seek reanchor changed HLS generation: before=%#v after=%#v", beforeOpts, afterOpts)
+	}
+	if after.LastRequestedSegment() != beforeRequested {
+		t.Fatalf("seek reanchor reset throttle progress: before=%d after=%d", beforeRequested, after.LastRequestedSegment())
+	}
+	if replanned.PlaybackPlan.PlanID != started.PlaybackPlan.PlanID {
+		t.Fatalf("seek reanchor changed plan identity: %q -> %q", started.PlaybackPlan.PlanID, replanned.PlaybackPlan.PlanID)
+	}
+	if replanned.PlaybackPlan.Stream.URL != beforeURL {
+		t.Fatalf("seek reanchor changed stream URL: %q -> %q", beforeURL, replanned.PlaybackPlan.Stream.URL)
+	}
+	afterTimeline := replanned.PlaybackPlan.Timeline
+	if afterTimeline.StreamOriginSeconds != beforeTimeline.StreamOriginSeconds ||
+		afterTimeline.TimelineOffsetSeconds != beforeTimeline.TimelineOffsetSeconds ||
+		!reflect.DeepEqual(afterTimeline.SeekWindowStartSeconds, beforeTimeline.SeekWindowStartSeconds) ||
+		afterTimeline.CanSeekAnywhere != beforeTimeline.CanSeekAnywhere ||
+		afterTimeline.SeekRestoration != beforeTimeline.SeekRestoration {
+		t.Fatalf("seek reanchor changed stream window: timeline %#v -> %#v", beforeTimeline, afterTimeline)
+	}
+	if afterTimeline.SourceStartSeconds != 120 || afterTimeline.PlayerStartSeconds != max(0, 120-beforeTimeline.StreamOriginSeconds) {
+		t.Fatalf("seek reanchor lost requested position: timeline %#v", afterTimeline)
+	}
+}
+
 func TestSidecarOnlyHLSReplanKeepsEffectiveToneMapFallback(t *testing.T) {
 	currentPlan := playback.PlanV3{
 		PlanID:               "current-plan",
@@ -4821,6 +4925,32 @@ func TestHasActiveReusableTransportV3Progressive(t *testing.T) {
 	// transcode-manager session or node URL alone.
 	if handler.hasActiveReusableTransportV3(localProgressive, playback.DeliveryRemuxHLSV3) {
 		t.Fatal("HLS delivery was deemed reusable from progressive-only routing evidence")
+	}
+}
+
+func TestSeekReanchorWithinActiveWindowV3(t *testing.T) {
+	start := 30.0
+	end := 90.0
+	openPlan := playback.PlanV3{Timeline: playback.TimelineV3{SeekWindowStartSeconds: &start}}
+	closedPlan := playback.PlanV3{Timeline: playback.TimelineV3{SeekWindowStartSeconds: &start, SeekWindowEndSeconds: &end}}
+	unbounded := playback.PlanV3{}
+
+	if seekReanchorWithinActiveWindowV3(openPlan, 29.99) {
+		t.Fatal("target before the window start must not reuse the active transport")
+	}
+	if !seekReanchorWithinActiveWindowV3(openPlan, start) {
+		t.Fatal("target at the window start must reuse the active transport")
+	}
+	// An open end intentionally allows forward jumps: the segment layer
+	// restarts FFmpeg in place for targets past the produced head.
+	if !seekReanchorWithinActiveWindowV3(openPlan, 10_000) {
+		t.Fatal("forward jump against an open window end must reuse the active transport")
+	}
+	if seekReanchorWithinActiveWindowV3(closedPlan, end+0.01) {
+		t.Fatal("target past a closed window end must not reuse the active transport")
+	}
+	if !seekReanchorWithinActiveWindowV3(unbounded, 0) {
+		t.Fatal("an unbounded window must reuse the active transport")
 	}
 }
 

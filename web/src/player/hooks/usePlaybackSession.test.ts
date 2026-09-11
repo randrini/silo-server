@@ -2670,3 +2670,120 @@ describe("usePlaybackSession plan audio inventory", () => {
     unmount();
   });
 });
+
+describe("usePlaybackSession retryable terminals", () => {
+  it("retries the same file with force_relink and coalesces a double-tap", async () => {
+    const startBodies: Array<Record<string, unknown>> = [];
+    let startCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        startCount += 1;
+        startBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (startCount === 1) {
+          return jsonResponse(
+            {
+              protocol_version: 3,
+              server_features: ["playback_plan_v3"],
+              outcome: "terminal",
+              terminal: {
+                reason: "virtual_source_unavailable",
+                message: "The virtual source could not be resolved for playback.",
+                retryable: true,
+              },
+            },
+            { status: 201 },
+          );
+        }
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3({ session_id: "session-1" }),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.error).toBeTruthy());
+    expect(result.current.errorReason).toBe("virtual_source_unavailable");
+    expect(result.current.errorRetryable).toBe(true);
+    expect(result.current.retrying).toBe(false);
+
+    // A second tap while the retry is in flight must not issue a second start.
+    act(() => {
+      result.current.retryStart();
+      result.current.retryStart();
+    });
+
+    await waitFor(() => expect(result.current.plan).not.toBeNull());
+    expect(startBodies).toHaveLength(2);
+    expect(startBodies[0]?.file_id).toBe(7);
+    expect(startBodies[1]).toMatchObject({ file_id: 7, force_relink: true });
+    expect(startBodies[1]?.playback_attempt_id).not.toBe(startBodies[0]?.playback_attempt_id);
+    expect(result.current.retrying).toBe(false);
+    expect(result.current.error).toBeNull();
+    unmount();
+  });
+
+  it("keeps a retryable terminal off the screen and retryable after a failed retry", async () => {
+    let startCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        startCount += 1;
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "terminal",
+            terminal: {
+              reason: "virtual_source_unavailable",
+              message:
+                startCount === 1
+                  ? "The virtual source could not be resolved for playback."
+                  : "The virtual source could not be refreshed for playback.",
+              retryable: true,
+            },
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.error).toBeTruthy());
+
+    act(() => result.current.retryStart());
+
+    await waitFor(() =>
+      expect(result.current.error).toBe("The virtual source could not be refreshed for playback."),
+    );
+    expect(result.current.errorReason).toBe("virtual_source_unavailable");
+    expect(result.current.errorRetryable).toBe(true);
+    expect(result.current.plan).toBeNull();
+    expect(result.current.retrying).toBe(false);
+    expect(startCount).toBe(2);
+    unmount();
+  });
+});

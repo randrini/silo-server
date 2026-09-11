@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -366,5 +367,55 @@ func TestRestartWaiterReceivesInFlightOutcome(t *testing.T) {
 	session.mu.Unlock()
 	if restartCount != 0 {
 		t.Errorf("restartCount = %d, want 0 (waiter must not perform a restart)", restartCount)
+	}
+}
+
+// TestRestartSeekTarget_CopyForwardJumpRequiresBoundedEnvelope pins the guard
+// around the copy-mode forward-jump fallback: it only fabricates a seek target
+// when the media duration is known and the requested segment lands inside that
+// envelope at or after the generation's first segment. Unknown-duration,
+// past-the-end, and before-start targets must stay unresolved so the caller
+// keeps its retryable-miss behavior.
+func TestRestartSeekTarget_CopyForwardJumpRequiresBoundedEnvelope(t *testing.T) {
+	base := func() *TranscodeSession {
+		return &TranscodeSession{
+			outputDir: t.TempDir(),
+			opts: TranscodeOpts{
+				SeekSeconds:            18.261,
+				StreamOriginSeconds:    18,
+				CopySeekAnchorResolved: true,
+				TargetCodecVideo:       "copy",
+				SegmentDuration:        2,
+				StartSegmentNumber:     9,
+				TotalDuration:          120,
+			},
+		}
+	}
+
+	unknown := base()
+	unknown.opts.TotalDuration = 0
+	if got, ok, err := unknown.RestartSeekTarget(40); err != nil || ok || got != 0 {
+		t.Fatalf("unknown-duration target = (%v, %v, %v), want (0, false, nil)", got, ok, err)
+	}
+
+	beyond := base()
+	beyond.opts.TotalDuration = 60
+	if got, ok, err := beyond.RestartSeekTarget(40); err != nil || ok || got != 0 {
+		t.Fatalf("past-envelope target = (%v, %v, %v), want (0, false, nil)", got, ok, err)
+	}
+
+	before := base()
+	if got, ok, err := before.RestartSeekTarget(5); err != nil || ok || got != 0 {
+		t.Fatalf("before-start target = (%v, %v, %v), want (0, false, nil)", got, ok, err)
+	}
+
+	inEnvelope := base()
+	got, ok, err := inEnvelope.RestartSeekTarget(40)
+	if err != nil || !ok {
+		t.Fatalf("bounded target = (%v, %v, %v), want (80, true, nil)", got, ok, err)
+	}
+	// base 18 + (40-9)*2 = 80.
+	if math.Abs(got-80) > 0.0001 {
+		t.Fatalf("bounded target = %.6f, want 80", got)
 	}
 }
