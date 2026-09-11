@@ -402,7 +402,8 @@ describe("WatchPage live inventory refresh", () => {
     expect(applyAudioInventory).toHaveBeenCalledWith(richerAudioTracks);
     // Menu data only: no restart or stream swap.
     expect(switchVersion).not.toHaveBeenCalled();
-    const playerProps = videoPlayerMock.mock.calls.at(-1)?.[0] as { streamUrl?: string };
+    const playerCalls = videoPlayerMock.mock.calls;
+    const playerProps = playerCalls[playerCalls.length - 1]?.[0] as { streamUrl?: string };
     expect(playerProps.streamUrl).toBe("/stream/session-1");
   });
 
