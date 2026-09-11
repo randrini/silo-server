@@ -2,15 +2,20 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps } from "react";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FileVersion } from "@/api/types";
 import ActionBar from "./ActionBar";
 
+const startPlayback = vi.fn();
 vi.mock("@/playback/watchPlaybackContext", () => ({
-  useWatchPlaybackController: () => ({ startPlayback: vi.fn() }),
+  useWatchPlaybackController: () => ({ startPlayback }),
 }));
 
 vi.mock("./SubtitlesPopover", () => ({
+  default: () => null,
+}));
+
+vi.mock("@/components/AddToCollectionDialog", () => ({
   default: () => null,
 }));
 
@@ -45,6 +50,10 @@ function renderActionBar(overrides: Partial<ActionBarProps> = {}) {
 }
 
 describe("ActionBar", () => {
+  afterEach(() => {
+    startPlayback.mockClear();
+  });
+
   it.each(playBranches)(
     "keeps the %s Play action on a compositor-only hover path",
     (_, overrides) => {
@@ -107,5 +116,32 @@ describe("ActionBar", () => {
     expect(watchedAction).toBeDisabled();
     expect(watchedAction).toHaveClass("enabled:cursor-pointer");
     expect(watchedAction).not.toHaveClass("cursor-pointer");
+  });
+
+  it("sends forceRelink when the selected version is unavailable", () => {
+    const unavailableVersion: FileVersion = { ...selectedVersion, available: false };
+    renderActionBar({
+      selectedVersion: unavailableVersion,
+      versions: [unavailableVersion],
+      contentId: "movie-1",
+    });
+
+    screen.getByRole("button", { name: "Play" }).click();
+    expect(startPlayback).toHaveBeenCalledOnce();
+    const arg = startPlayback.mock.calls[0]?.[0] as { forceRelink?: boolean } | undefined;
+    expect(arg?.forceRelink).toBe(true);
+  });
+
+  it("does not send forceRelink when the selected version is available", () => {
+    renderActionBar({
+      selectedVersion,
+      versions: [selectedVersion],
+      contentId: "movie-1",
+    });
+
+    screen.getByRole("button", { name: "Play" }).click();
+    expect(startPlayback).toHaveBeenCalledOnce();
+    const arg = startPlayback.mock.calls[0]?.[0] as { forceRelink?: boolean } | undefined;
+    expect(arg?.forceRelink).toBeUndefined();
   });
 });

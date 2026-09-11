@@ -377,7 +377,7 @@ func TestVirtualCandidateLookupUsesStableEpisodeIdentity(t *testing.T) {
 		FilePath:  "virtual://series/tt11198330/3/2",
 	}
 
-	resolved, err := h.resolveVirtualPlaybackSource(req, episodeFile, "profile-1", false, nil, "", "", 0)
+	resolved, err := h.resolveVirtualPlaybackSource(req, episodeFile, "profile-1", false, nil, "", "", 0, false)
 	if err != nil {
 		t.Fatalf("resolveVirtualPlaybackSource failed: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestResolveVirtualPlaybackSourceKeepsUnprobedPinnedFallbackWhenOthersFail(t
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
 	file := &models.MediaFile{ID: 10, ContentID: "movie-1", FilePath: "virtual://movie/1"}
 
-	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0)
+	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0, false)
 	if err != nil {
 		t.Fatalf("resolveVirtualPlaybackSource returned error %v, want fallback to resolved pinned candidate", err)
 	}
@@ -509,7 +509,7 @@ func TestResolveVirtualPlaybackSourceExplicitResultPreservesSelectedVersion(t *t
 		FilePath:  "virtual://movie/1?result=stream-1080p",
 	}
 
-	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0)
+	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0, false)
 	if err != nil {
 		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
 	}
@@ -889,5 +889,139 @@ func TestMergeVirtualCandidateLanguagesHintsStayOnCandidate(t *testing.T) {
 	}
 	if len(probed.AudioTracks) > 1 {
 		t.Fatal("a French ordinal would exist — the hint became a stream")
+	}
+}
+
+// completeEvidenceVirtualMovieFile is a virtual result= row carrying the full
+// video/audio/container evidence a prior probe would have persisted, so the
+// resolver's needsCandidateMetadata gate is false and only force_relist can
+// make it list again.
+func completeEvidenceVirtualMovieFile(path string) *models.MediaFile {
+	return &models.MediaFile{
+		ID:         30,
+		ContentID:  "movie-1",
+		FilePath:   path,
+		Container:  "mkv",
+		CodecVideo: "h264",
+		Resolution: "1080p",
+		VideoTracks: []models.VideoTrack{{
+			Codec: "h264", Width: 1920, Height: 1080, FrameRate: "24000/1001",
+		}},
+		AudioTracks: []models.AudioTrack{{Codec: "aac", Channels: 2}},
+	}
+}
+
+// A forced relist on an explicitly-selected version must query the provider
+// even though the pinned row already carries complete evidence, and must keep
+// the pinned candidate at index 0 when the fresh list still contains it.
+func TestResolveVirtualPlaybackSourceForceRelistListsAndKeepsPin(t *testing.T) {
+	pinned := VirtualPlaybackStream{ID: "pin", URI: "virtual://movie/1?result=pin", Resolution: "1080p", CodecVideo: "h264"}
+	alternate := VirtualPlaybackStream{ID: "alt", URI: "virtual://movie/1?result=alt", Resolution: "1080p", CodecVideo: "h264"}
+
+	listCalls := 0
+	var resolvedPaths []string
+	var forceRefreshArgs []bool
+	h := &PlaybackHandler{
+		VirtualPlaybackResolver: VirtualPlaybackResolverFunc(func(_ context.Context, path string, _ int, _ string, _ int) (string, error) {
+			return path, nil
+		}),
+		VirtualPlaybackStreamLister: VirtualPlaybackStreamListerFunc(func(_ context.Context, _ string, _ int, _ string, _ int) ([]VirtualPlaybackStream, error) {
+			listCalls++
+			return []VirtualPlaybackStream{pinned, alternate}, nil
+		}),
+		VirtualMediaDetailedResolver: VirtualMediaDetailedResolverFunc(func(_ context.Context, virtualURI string, _ int, _ int, _ string, forceRefresh bool, _ []string, _ string) (ResolvedVirtualMedia, error) {
+			resolvedPaths = append(resolvedPaths, virtualURI)
+			forceRefreshArgs = append(forceRefreshArgs, forceRefresh)
+			return ResolvedVirtualMedia{URL: "http://localhost:8080/stream.mp4", URI: virtualURI}, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	file := completeEvidenceVirtualMovieFile(pinned.URI)
+
+	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0, true)
+	if err != nil {
+		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+	}
+	if listCalls != 1 {
+		t.Fatalf("lister calls = %d, want 1 when forceRelist is set on complete evidence", listCalls)
+	}
+	if resolved.URI != pinned.URI {
+		t.Fatalf("resolved URI = %q, want the still-listed pinned candidate %q", resolved.URI, pinned.URI)
+	}
+	if len(resolvedPaths) == 0 || resolvedPaths[0] != pinned.URI {
+		t.Fatalf("first resolved path = %v, want pinned %q", resolvedPaths, pinned.URI)
+	}
+	if len(forceRefreshArgs) == 0 || !forceRefreshArgs[0] {
+		t.Fatalf("forceRefresh args = %v, want true on a forced relist", forceRefreshArgs)
+	}
+}
+
+// Without force_relist, a pinned result= row with complete evidence must skip
+// the provider listing entirely — the behavior force_relist exists to override.
+func TestResolveVirtualPlaybackSourceCompleteEvidenceSkipsListerWithoutForceRelist(t *testing.T) {
+	pinned := VirtualPlaybackStream{ID: "pin", URI: "virtual://movie/1?result=pin", Resolution: "1080p", CodecVideo: "h264"}
+
+	listCalls := 0
+	h := &PlaybackHandler{
+		VirtualPlaybackResolver: VirtualPlaybackResolverFunc(func(_ context.Context, path string, _ int, _ string, _ int) (string, error) {
+			return path, nil
+		}),
+		VirtualPlaybackStreamLister: VirtualPlaybackStreamListerFunc(func(_ context.Context, _ string, _ int, _ string, _ int) ([]VirtualPlaybackStream, error) {
+			listCalls++
+			return []VirtualPlaybackStream{pinned}, nil
+		}),
+		VirtualMediaDetailedResolver: VirtualMediaDetailedResolverFunc(func(_ context.Context, virtualURI string, _ int, _ int, _ string, _ bool, _ []string, _ string) (ResolvedVirtualMedia, error) {
+			return ResolvedVirtualMedia{URL: "http://localhost:8080/stream.mp4", URI: virtualURI}, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	file := completeEvidenceVirtualMovieFile(pinned.URI)
+
+	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0, false)
+	if err != nil {
+		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+	}
+	if listCalls != 0 {
+		t.Fatalf("lister calls = %d, want 0 for complete evidence without forceRelist", listCalls)
+	}
+	if resolved.URI != pinned.URI {
+		t.Fatalf("resolved URI = %q, want pinned %q", resolved.URI, pinned.URI)
+	}
+}
+
+// When the forced fresh listing no longer contains the pinned version, the
+// stale pin must be dropped so resolution moves to the current candidate.
+func TestResolveVirtualPlaybackSourceForceRelistDropsGonePin(t *testing.T) {
+	pinnedURI := "virtual://movie/1?result=pin"
+	fresh := VirtualPlaybackStream{ID: "fresh", URI: "virtual://movie/1?result=fresh", Resolution: "1080p", CodecVideo: "h264"}
+
+	var resolvedPaths []string
+	h := &PlaybackHandler{
+		VirtualPlaybackResolver: VirtualPlaybackResolverFunc(func(_ context.Context, path string, _ int, _ string, _ int) (string, error) {
+			return path, nil
+		}),
+		VirtualPlaybackStreamLister: VirtualPlaybackStreamListerFunc(func(_ context.Context, _ string, _ int, _ string, _ int) ([]VirtualPlaybackStream, error) {
+			return []VirtualPlaybackStream{fresh}, nil
+		}),
+		VirtualMediaDetailedResolver: VirtualMediaDetailedResolverFunc(func(_ context.Context, virtualURI string, _ int, _ int, _ string, _ bool, _ []string, _ string) (ResolvedVirtualMedia, error) {
+			resolvedPaths = append(resolvedPaths, virtualURI)
+			return ResolvedVirtualMedia{URL: "http://localhost:8080/stream.mp4", URI: virtualURI}, nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	file := completeEvidenceVirtualMovieFile(pinnedURI)
+
+	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0, true)
+	if err != nil {
+		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+	}
+	if resolved.URI != fresh.URI {
+		t.Fatalf("resolved URI = %q, want the fresh candidate %q after the pin disappeared", resolved.URI, fresh.URI)
+	}
+	if len(resolvedPaths) == 0 || resolvedPaths[0] != fresh.URI {
+		t.Fatalf("first resolved path = %v, want fresh %q", resolvedPaths, fresh.URI)
 	}
 }

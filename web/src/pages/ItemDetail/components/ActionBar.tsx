@@ -242,6 +242,7 @@ export default function ActionBar({
       libraryId?: number;
       restart?: boolean;
       returnHref?: string;
+      forceRelink?: boolean;
     }) => ({
       ...base,
       audioTrackIndex:
@@ -478,6 +479,7 @@ export default function ActionBar({
           fileId: selectedVersion.file_id,
           restart,
           returnHref: currentHref,
+          forceRelink: selectedVersion.available === false ? true : undefined,
         }),
       );
     },

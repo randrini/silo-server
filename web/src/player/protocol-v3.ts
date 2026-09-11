@@ -313,6 +313,10 @@ export interface StartRequestV3 {
    * terminal for a capability reason.
    */
   file_selection?: "auto" | "explicit";
+  /** When true, the server should force a re-link/re-query of the virtual file
+   *  on this start attempt. Only sent when the viewer explicitly picks an
+   *  unavailable version. */
+  force_relink?: boolean;
   subtitle_track_id?: string;
   subtitle_track_index?: number;
   metered: boolean;

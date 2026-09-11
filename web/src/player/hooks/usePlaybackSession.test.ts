@@ -171,6 +171,16 @@ describe("buildStartRequestV3", () => {
       quality_preference: "original",
     });
   });
+
+  it("emits force_relink when forceRelink is true", () => {
+    expect(buildStartRequestV3({ ...startBase, forceRelink: true })).toMatchObject({
+      force_relink: true,
+    });
+  });
+
+  it("omits force_relink when forceRelink is absent", () => {
+    expect(buildStartRequestV3(startBase)).not.toHaveProperty("force_relink");
+  });
 });
 
 describe("buildReplanRequestV3", () => {

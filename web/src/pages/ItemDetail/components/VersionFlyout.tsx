@@ -117,7 +117,7 @@ export default function VersionFlyoutItems({ versions, onPlayVersion }: VersionF
         return (
           <DropdownMenuItem
             key={version.file_id}
-            className={`flex items-center gap-3 rounded-lg py-2.5 ${unavailable ? "opacity-60" : ""}`}
+            className={`flex items-center gap-3 rounded-lg py-2.5 ${unavailable ? "opacity-80" : ""}`}
             onSelect={() => onPlayVersion(version.file_id)}
           >
             <span className="bg-accent/70 flex size-7 shrink-0 items-center justify-center rounded-full">
@@ -142,10 +142,10 @@ export default function VersionFlyoutItems({ versions, onPlayVersion }: VersionF
                   )}
                   {unavailable && (
                     <Badge
-                      variant="destructive"
-                      className="shrink-0 px-1.5 py-0 text-[10px] font-medium uppercase"
+                      variant="outline"
+                      className="shrink-0 border-amber-500/30 bg-amber-500/15 px-1.5 py-0 text-[10px] font-medium text-amber-600 dark:text-amber-300"
                     >
-                      Unavailable
+                      Will retry on play
                     </Badge>
                   )}
                 </span>

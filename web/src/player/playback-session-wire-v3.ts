@@ -79,6 +79,10 @@ export interface StartRequestInput {
   /** How the requested file was chosen; `explicit` forbids silent server-side
    * version substitution. Omitted means the server owns the choice. */
   fileSelection?: "auto" | "explicit";
+  /** When true, the server should force a re-link/re-query of the virtual file
+   *  on this start attempt. Only sent when the viewer explicitly picks an
+   *  unavailable version. */
+  forceRelink?: boolean;
   metered: boolean;
   bandwidthEstimateKbps?: number | null;
   bandwidthCapKbps?: number | null;
@@ -118,6 +122,7 @@ export function buildStartRequestV3(input: StartRequestInput): StartRequestV3 {
       : {}),
     ...(input.carriedAudioTrackID ? { carried_audio_track_id: input.carriedAudioTrackID } : {}),
     ...(input.fileSelection ? { file_selection: input.fileSelection } : {}),
+    ...(input.forceRelink ? { force_relink: input.forceRelink } : {}),
     ...(input.subtitleTrackIndex != null && input.subtitleTrackIndex >= 0
       ? { subtitle_track_index: input.subtitleTrackIndex }
       : {}),

@@ -314,6 +314,15 @@ type resolvedVirtualPlaybackSource struct {
 	Provenance     ProbeProvenance
 }
 
+// shouldListVirtualPlaybackCandidates reports whether the resolver must ask
+// the provider for a candidate list. A pinned result= URI with complete
+// probed evidence normally skips the round-trip. forceRelist overrides that so
+// an explicit retry of an unavailable version sees the provider's current list
+// rather than re-trying the stale pinned candidate.
+func shouldListVirtualPlaybackCandidates(noResult, needsCandidateMetadata, forceRelist bool) bool {
+	return noResult || needsCandidateMetadata || forceRelist
+}
+
 // resolveVirtualPlaybackSource chooses a ranked provider-neutral result,
 // resolves it, and probes it before planning. A result URI is bound to the
 // session so later Range, seek, subtitle, and transcode requests cannot silently
@@ -332,7 +341,14 @@ type resolvedVirtualPlaybackSource struct {
 // provider candidate. qualityPreference (already normalized) and
 // bandwidthCapKbps steer the post-device-ranking reorder toward native
 // lower-resolution candidates when the client asked for a fixed rung.
-func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *models.MediaFile, profileID string, deferProbe bool, excludedCandidateIDs []string, preferredCandidateID string, qualityPreference string, bandwidthCapKbps int) (resolvedVirtualPlaybackSource, error) {
+//
+// forceRelist forces a fresh provider listing for an explicitly re-selected
+// version that the catalog marked unavailable, instead of replaying the cached
+// or pinned candidate. It also bypasses the detailed resolver's candidate cache
+// so the retry sees the provider's current list. The pinned candidate is kept
+// at index 0 while it is still listed; once the pin is gone the fresh list
+// takes over.
+func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *models.MediaFile, profileID string, deferProbe bool, excludedCandidateIDs []string, preferredCandidateID string, qualityPreference string, bandwidthCapKbps int, forceRelist bool) (resolvedVirtualPlaybackSource, error) {
 	if !isVirtualPlaybackFile(file) {
 		return resolvedVirtualPlaybackSource{File: file}, nil
 	}
@@ -370,7 +386,7 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 			noResult = false // treated as if file already had a result=
 		}
 	}
-	if (noResult || needsCandidateMetadata) && h.VirtualPlaybackStreamLister != nil {
+	if shouldListVirtualPlaybackCandidates(noResult, needsCandidateMetadata, forceRelist) && h.VirtualPlaybackStreamLister != nil {
 		// Candidate listing is part of the startup critical path. Keep it
 		// bounded so the first-byte SLA cannot be defeated before resolution.
 		listCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -412,16 +428,27 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 				if parsed != nil {
 					resultID = strings.TrimSpace(parsed.Query().Get("result"))
 				}
+				pinFound := false
 				for _, s := range streams {
 					if s.URI == file.FilePath || (resultID != "" && s.ID == resultID) {
 						candidates[0] = s
+						pinFound = true
 						break
 					}
 				}
 				if len(filtered) > 0 {
 					rankedAlternatives, _ := h.rankVirtualCandidatesForDevice(r, filtered)
 					rankedAlternatives = reorderVirtualCandidatesForQuality(rankedAlternatives, qualityPreference, bandwidthCapKbps)
-					candidates = append([]VirtualPlaybackStream{candidates[0]}, rankedAlternatives...)
+					if forceRelist && !pinFound {
+						// The forced fresh listing no longer carries the pinned
+						// version. Drop the stale pin instead of retrying a
+						// candidate the provider stopped listing; the ranked
+						// fresh list takes over and rotation/stale-fallback can
+						// work from it.
+						candidates = rankedAlternatives
+					} else {
+						candidates = append([]VirtualPlaybackStream{candidates[0]}, rankedAlternatives...)
+					}
 				}
 			}
 		}
@@ -446,7 +473,7 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 		var resolveErr error
 		if h.VirtualMediaDetailedResolver != nil {
 			res, err := h.VirtualMediaDetailedResolver.ResolveVirtualMediaDetailed(
-				attemptCtx, cand.URI, oid, userID, profileID, false, excludedCandidateIDs, preferredCandidateID,
+				attemptCtx, cand.URI, oid, userID, profileID, forceRelist, excludedCandidateIDs, preferredCandidateID,
 			)
 			if err == nil {
 				streamURL = res.URL

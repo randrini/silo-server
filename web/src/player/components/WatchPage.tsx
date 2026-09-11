@@ -77,6 +77,7 @@ export function WatchPage({
   initialSubtitleTrackIndexByFileId,
   initialBitmapSubtitleTrackIndexByFileId,
   explicitFileSelection = false,
+  forceRelink = false,
   preferredSubtitleLanguage,
   preferredSubtitleTrackSignature,
   subtitleMode,
@@ -136,6 +137,7 @@ export function WatchPage({
     initialSubtitleTrackIndexByFileId,
     initialBitmapSubtitleTrackIndexByFileId,
     explicitFileSelection,
+    forceRelink,
   );
 
   const initialSubtitleErrorKeyRef = useRef<string | null>(null);

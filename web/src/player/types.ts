@@ -253,6 +253,10 @@ export interface WatchPageProps {
   /** True when the initial `fileId` was explicitly chosen by the viewer; the
    * server must not silently substitute another version. */
   explicitFileSelection?: boolean;
+  /** When true, the server should force a re-link/re-query of the virtual file
+   *  on this start attempt. Only set when the viewer explicitly picks an
+   *  unavailable version. */
+  forceRelink?: boolean;
   /** Initial server subtitle ordinal keyed by file ID. Missing entries mean subtitles start off. */
   initialSubtitleTrackIndexByFileId?: Record<number, number>;
   /**

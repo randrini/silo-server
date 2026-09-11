@@ -60,7 +60,7 @@ func TestResolveUsesResolutionTimeHeadersAuthoritatively(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
 	file := &models.MediaFile{ID: 10, ContentID: "movie-1", FilePath: "virtual://movie/1?result=cand-1"}
-	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0)
+	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0, false)
 	if err != nil {
 		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestResolveClearedHeadersDoNotRetainStaleHeaders(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
 	file := &models.MediaFile{ID: 11, ContentID: "movie-1", FilePath: "virtual://movie/1?result=cand-1"}
-	if _, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0); err != nil {
+	if _, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0, false); err != nil {
 		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
 	}
 	if len(probedHeaders) != 0 {

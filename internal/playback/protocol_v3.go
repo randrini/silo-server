@@ -533,7 +533,12 @@ type StartRequestV3 struct {
 	// auto/default selection. Absent means auto, preserving existing client
 	// behavior; an explicit pick pins the requested file and disables the
 	// start-path alternate-file fallback.
-	FileSelection         FileSelectionV3           `json:"file_selection,omitempty"`
+	FileSelection FileSelectionV3 `json:"file_selection,omitempty"`
+	// ForceRelink asks the server to fetch a fresh provider listing for an
+	// explicitly re-selected version instead of trusting the cached or pinned
+	// candidate. It is only meaningful alongside an explicit file_selection;
+	// absent means the server keeps its existing listing/cache behavior.
+	ForceRelink           bool                      `json:"force_relink,omitempty"`
 	Metered               bool                      `json:"metered"`
 	BandwidthEstimateKbps *int                      `json:"bandwidth_estimate_kbps,omitempty"`
 	BandwidthCapKbps      *int                      `json:"bandwidth_cap_kbps,omitempty"`

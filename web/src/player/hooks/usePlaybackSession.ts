@@ -314,6 +314,10 @@ export function usePlaybackSession(
   /** True when the initial `fileId` was explicitly chosen by the viewer (not
    * auto-selected); the server must not silently substitute another version. */
   explicitFileSelection = false,
+  /** When true, the server should force a re-link/re-query of the virtual file
+   *  on this start attempt. Only set when the viewer explicitly picks an
+   *  unavailable version. */
+  forceRelink = false,
 ): UsePlaybackSessionResult {
   const config = usePlayerConfig();
   const probe = useCodecDetection();
@@ -580,6 +584,7 @@ export function usePlaybackSession(
       subtitleTrackIndex: number | undefined,
       carriedAudioTrackID: string | null,
       fileSelection: "auto" | "explicit",
+      forceRelink?: boolean,
     ): Promise<DecisionResponseV3> => {
       const body = buildStartRequestV3({
         extraClientFeatures: VIDEO_CLIENT_FEATURES_V3,
@@ -595,6 +600,7 @@ export function usePlaybackSession(
         explicitAudioTrackIndex: carriedAudioTrackID ? null : explicitAudioTrackIndex,
         carriedAudioTrackID,
         fileSelection,
+        forceRelink,
         subtitleTrackIndex,
         metered: detectMeteredV3(),
         bandwidthEstimateKbps: detectBandwidthEstimateKbpsV3(),
@@ -685,6 +691,7 @@ export function usePlaybackSession(
       initialErrorMessage,
       carriedAudioTrackId,
       fileSelection,
+      forceRelink,
     }: {
       preferredFileId?: number;
       position: number;
@@ -699,6 +706,10 @@ export function usePlaybackSession(
       /** How the requested file was chosen; `explicit` forbids silent
        * server-side version substitution. */
       fileSelection?: "auto" | "explicit";
+      /** When true, the server should force a re-link/re-query of the virtual
+       * file on this start attempt. Only set when the viewer explicitly picks
+       * an unavailable version. */
+      forceRelink?: boolean;
     }) => {
       const previousState = stateRef.current;
       const previousSessionId = sessionIdRef.current;
@@ -781,6 +792,7 @@ export function usePlaybackSession(
           initialSubtitleTrackIndexByFileId?.[selectedFileId],
           carriedAudioTrackId ?? null,
           fileSelection ?? "auto",
+          forceRelink,
         );
 
         if (loadSequence !== loadSequenceRef.current) {
@@ -818,6 +830,7 @@ export function usePlaybackSession(
             undefined,
             carriedAudioTrackId ?? null,
             fileSelection ?? "auto",
+            forceRelink,
           );
           if (!decisionToAdopt.playback_plan) {
             initialSubtitleFailure = null;
@@ -925,6 +938,7 @@ export function usePlaybackSession(
       replacementErrorMessage: "Failed to replace playback request",
       initialErrorMessage: "Failed to start playback",
       fileSelection: explicitFileSelection ? "explicit" : "auto",
+      forceRelink,
     });
   }, [
     capabilityRequestKey,
@@ -932,6 +946,7 @@ export function usePlaybackSession(
     explicitFileSelection,
     fileId,
     forceInitialPosition,
+    forceRelink,
     initialPosition,
     loadSession,
     qualityPreference,

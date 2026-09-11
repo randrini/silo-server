@@ -164,7 +164,7 @@ function VersionDropdown({
                   }}
                   className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors ${
                     isSelected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
-                  } ${unavailable ? "opacity-60" : ""}`}
+                  } ${unavailable && !isSelected ? "opacity-80" : ""}`}
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -179,10 +179,10 @@ function VersionDropdown({
                         ) : null}
                         {unavailable ? (
                           <Badge
-                            variant="destructive"
-                            className="px-1.5 py-0 text-[10px] font-medium uppercase"
+                            variant="outline"
+                            className="border-amber-500/30 bg-amber-500/15 px-1.5 py-0 text-[10px] font-medium text-amber-600 dark:text-amber-300"
                           >
-                            Unavailable
+                            Will retry on play
                           </Badge>
                         ) : null}
                       </div>

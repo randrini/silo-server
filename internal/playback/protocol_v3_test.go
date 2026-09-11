@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -150,6 +151,47 @@ func TestStartRequestV3FileSelectionValidation(t *testing.T) {
 	req.FileSelection = FileSelectionV3("user-picked")
 	if _, err := req.NormalizeAndValidate(); err == nil {
 		t.Fatal("invalid file_selection accepted")
+	}
+}
+
+// TestStartRequestV3ForceRelinkDecode covers the wire round-trip for the
+// force_relink override: an explicit value survives JSON decode, and an omitted
+// value stays off the wire and decodes as false.
+func TestStartRequestV3ForceRelinkDecode(t *testing.T) {
+	req := validStartRequestV3()
+	req.ForceRelink = true
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte(`"force_relink":true`)) {
+		t.Fatalf("force_relink missing from encoded start request: %s", body)
+	}
+	var decoded StartRequestV3
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.ForceRelink {
+		t.Fatal("force_relink did not survive JSON decode")
+	}
+	if _, err := decoded.NormalizeAndValidate(); err != nil {
+		t.Fatalf("decoded force_relink request rejected: %v", err)
+	}
+
+	// Omitted force_relink must stay off the wire and decode as false.
+	body, err = json.Marshal(validStartRequestV3())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte("force_relink")) {
+		t.Fatalf("omitted force_relink must not be encoded: %s", body)
+	}
+	decoded = StartRequestV3{}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ForceRelink {
+		t.Fatal("omitted force_relink decoded as true")
 	}
 }
 

@@ -67,8 +67,8 @@ describe("VersionDropdown unavailable versions", () => {
 
     const unavailableRow = dialog.getByRole("button", { name: /1080p/ });
     expect(unavailableRow).toBeInTheDocument();
-    expect(dialog.getByText("Unavailable")).toBeInTheDocument();
-    expect(unavailableRow).toHaveClass("opacity-60");
+    expect(dialog.getByText("Will retry on play")).toBeInTheDocument();
+    expect(unavailableRow).toHaveClass("opacity-80");
   });
 
   it("keeps the active selection visible even when it becomes unavailable", () => {
@@ -89,6 +89,7 @@ describe("VersionDropdown unavailable versions", () => {
     // The selected (unavailable) version stays in the list, and the toggle is
     // not offered because nothing else is hidden.
     expect(dialog.getByRole("button", { name: /1080p/ })).toBeInTheDocument();
+    expect(dialog.getByText("Will retry on play")).toBeInTheDocument();
     expect(dialog.queryByRole("button", { name: /Show .* unavailable/ })).not.toBeInTheDocument();
   });
 
@@ -149,7 +150,7 @@ describe("VersionFlyoutItems unavailable versions", () => {
 
     const unavailableRow = screen.getByRole("menuitem", { name: /1080p/ });
     expect(unavailableRow).toBeInTheDocument();
-    expect(screen.getByText("Unavailable")).toBeInTheDocument();
-    expect(unavailableRow).toHaveClass("opacity-60");
+    expect(screen.getByText("Will retry on play")).toBeInTheDocument();
+    expect(unavailableRow).toHaveClass("opacity-80");
   });
 });
