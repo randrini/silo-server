@@ -6091,12 +6091,22 @@ func reuseEligibleDeliveryV3(delivery playback.DeliveryV3) bool {
 }
 
 // seekReanchorWithinActiveWindowV3 reports whether a seek target can be served
-// by the active transport's window. A target before the window start needs a
-// fresh generation (the reused one cannot produce bytes before its origin); a
-// target past the produced head is deliberately allowed through, because the
-// segment layer restarts FFmpeg in place for it. A closed window end is
-// honored so reuse never claims a range the transport no longer serves.
+// in place by the active transport's window. Only a segment-addressable HLS
+// transport can: its manifest resolves an arbitrary position against the
+// growing generation, and the segment layer restarts FFmpeg in place for
+// targets past the produced head. A progressive remux response is a single
+// continuous byte stream from its original start, so reusing it for a seek
+// hands the client a URL whose bytes already (or never) cover the target; a
+// progressive reanchor must rebuild instead.
+//
+// A target before an HLS window's start needs a fresh generation (the reused
+// one cannot produce bytes before its origin); a target past the produced head
+// is deliberately allowed through. A closed window end is honored so reuse
+// never claims a range the transport no longer serves.
 func seekReanchorWithinActiveWindowV3(plan playback.PlanV3, position float64) bool {
+	if !isHLSDeliveryV3(plan.Delivery) {
+		return false
+	}
 	if plan.Timeline.SeekWindowStartSeconds != nil && position < *plan.Timeline.SeekWindowStartSeconds {
 		return false
 	}

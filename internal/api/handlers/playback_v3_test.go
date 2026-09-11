@@ -4821,6 +4821,76 @@ func TestHandleReplanPlaybackV3SeekReanchorReusesCopyHLSTransport(t *testing.T) 
 	}
 }
 
+// TestHandleReplanPlaybackV3SeekReanchorRebuildsProgressiveTransport pins the
+// fix for the in-place-seek regression: a server_remux_progressive response is
+// one continuous byte stream, not a segment-addressable manifest, so a
+// reanchor on it must rebuild the transport instead of reusing the URL the
+// client is already reading. Reusing it left the player no bytes at the target
+// and it snapped back (web) or stalled (Android).
+func TestHandleReplanPlaybackV3SeekReanchorRebuildsProgressiveTransport(t *testing.T) {
+	file := v3HandlerFixtureFile(t)
+	file.Container = "mkv"
+	file.FilePath = writePlaybackTestMediaFile(t, "movie.mkv")
+	manager := playback.NewSessionManager(0, 0)
+	handler := NewPlaybackHandler(manager, testPlaybackFileResolver{file: file})
+	handler.PlaybackConfig = playbackTestConfig(writePlaybackTestFFmpeg(t), t.TempDir())
+	presetLocalRegistryV3(handler, playback.NewTransformationRegistryV3(nil))
+	handler.SettingsRepo = &mutablePlaybackSettingsV3{values: map[string]string{"allow_4k_transcode": "true"}}
+	handler.ItemAccess = allowAllPlaybackItemAccess{}
+	stubCopySeekAnchorV3(handler)
+
+	startRequest := v3HandlerStartRequest()
+	startRequest.ClientPlaybackContext.Deliveries = map[string]playback.DeliveryCapabilityV3{
+		playback.DeliveryClassProgressiveV3: {
+			Enabled: true, SupportedOnDevice: true,
+			Subtitles: playback.DeliverySubtitleCapabilitiesV3{SidecarText: true},
+		},
+	}
+	startRR := httptest.NewRecorder()
+	handler.HandleStartPlayback(startRR, httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", strings.NewReader(marshalV3StartRequest(t, startRequest))).WithContext(newAuthorizedPlaybackContext()))
+	var started playback.DecisionResponseV3
+	if startRR.Code != http.StatusCreated || json.Unmarshal(startRR.Body.Bytes(), &started) != nil || started.PlaybackPlan == nil {
+		t.Fatalf("start status=%d body=%s", startRR.Code, startRR.Body.String())
+	}
+	if started.PlaybackPlan.Delivery != playback.DeliveryRemuxProgressiveV3 {
+		t.Fatalf("start plan = %#v, want progressive remux", started.PlaybackPlan)
+	}
+	beforeURL := started.PlaybackPlan.Stream.URL
+
+	replanned := postPlaybackReplanV3(t, handler, started.SessionID, playback.ReplanRequestV3{
+		ProtocolVersion:       playback.ProtocolV3,
+		Operation:             playback.ReplanOperationSeekReanchorV3,
+		PlaybackAttemptID:     startRequest.PlaybackAttemptID,
+		ReplanRequestID:       "seek-reanchor-progressive-0001",
+		FailedPlanID:          started.PlaybackPlan.PlanID,
+		PlanAttemptID:         "seek-reanchor-progressive-attempt-0001",
+		PlanAttemptKey:        started.PlaybackPlan.PlanAttemptKey,
+		AttemptCount:          1,
+		QualityPreference:     startRequest.QualityPreference,
+		PositionSeconds:       120,
+		SelectedTracks:        started.PlaybackPlan.SelectedTracks,
+		Capabilities:          startRequest.Capabilities,
+		ClientPlaybackContext: startRequest.ClientPlaybackContext,
+	})
+	if replanned.PlaybackPlan == nil {
+		t.Fatalf("seek reanchor returned no plan: outcome=%s terminal=%+v", replanned.Outcome, replanned.Terminal)
+	}
+	afterURL := replanned.PlaybackPlan.Stream.URL
+	if afterURL == beforeURL {
+		t.Fatalf("progressive seek reanchor reused the active transport URL %q", beforeURL)
+	}
+	parsed, err := url.Parse(afterURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Query().Get("seek"); got != "120" {
+		t.Fatalf("progressive seek reanchor stream URL %q has seek=%q, want the rebuilt 120 target", afterURL, got)
+	}
+	if replanned.PlaybackPlan.Timeline.SourceStartSeconds != 120 {
+		t.Fatalf("progressive seek reanchor timeline = %#v", replanned.PlaybackPlan.Timeline)
+	}
+}
+
 func TestSidecarOnlyHLSReplanKeepsEffectiveToneMapFallback(t *testing.T) {
 	currentPlan := playback.PlanV3{
 		PlanID:               "current-plan",
@@ -4931,9 +5001,12 @@ func TestHasActiveReusableTransportV3Progressive(t *testing.T) {
 func TestSeekReanchorWithinActiveWindowV3(t *testing.T) {
 	start := 30.0
 	end := 90.0
-	openPlan := playback.PlanV3{Timeline: playback.TimelineV3{SeekWindowStartSeconds: &start}}
-	closedPlan := playback.PlanV3{Timeline: playback.TimelineV3{SeekWindowStartSeconds: &start, SeekWindowEndSeconds: &end}}
-	unbounded := playback.PlanV3{}
+	hlsBase := playback.PlanV3{Delivery: playback.DeliveryRemuxHLSV3}
+	openPlan := hlsBase
+	openPlan.Timeline = playback.TimelineV3{SeekWindowStartSeconds: &start}
+	closedPlan := hlsBase
+	closedPlan.Timeline = playback.TimelineV3{SeekWindowStartSeconds: &start, SeekWindowEndSeconds: &end}
+	unbounded := hlsBase
 
 	if seekReanchorWithinActiveWindowV3(openPlan, 29.99) {
 		t.Fatal("target before the window start must not reuse the active transport")
@@ -4951,6 +5024,25 @@ func TestSeekReanchorWithinActiveWindowV3(t *testing.T) {
 	}
 	if !seekReanchorWithinActiveWindowV3(unbounded, 0) {
 		t.Fatal("an unbounded window must reuse the active transport")
+	}
+
+	// A progressive remux is a single continuous byte stream, not a
+	// segment-addressable manifest: no target can be served in place, no matter
+	// how permissive the window looks. Reusing it hands the client a URL whose
+	// bytes never move to the requested position.
+	progressiveOpen := playback.PlanV3{
+		Delivery: playback.DeliveryRemuxProgressiveV3,
+		Timeline: playback.TimelineV3{SeekWindowStartSeconds: &start},
+	}
+	if seekReanchorWithinActiveWindowV3(progressiveOpen, start) {
+		t.Fatal("progressive remux must not reuse its transport for an in-window seek")
+	}
+	if seekReanchorWithinActiveWindowV3(progressiveOpen, 10_000) {
+		t.Fatal("progressive remux must not reuse its transport for a forward seek")
+	}
+	progressiveUnbounded := playback.PlanV3{Delivery: playback.DeliveryRemuxProgressiveV3}
+	if seekReanchorWithinActiveWindowV3(progressiveUnbounded, 0) {
+		t.Fatal("progressive remux must rebuild even with an unbounded window")
 	}
 }
 
