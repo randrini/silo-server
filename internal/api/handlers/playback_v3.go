@@ -5596,7 +5596,17 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 		}
 	}
 	transportReused := false
-	if trackChange && h.hasActiveReusableTransportV3(session, record.CurrentPlan.Delivery) {
+	// A track change or a seek reanchor that keeps a byte-identical A/V recipe
+	// can keep the active transport. The segment layer serves the new position
+	// from the same growing HLS generation — restarting FFmpeg in place when
+	// the target is past the produced head — so rebuilding the transport would
+	// only add a teardown/respawn and, for virtual sources, a provider
+	// re-resolution that turns an in-session seek into a fresh-start stall.
+	// validateSeekReanchorPlanV3 has already rejected any route-identity drift,
+	// and a target before the active window's start still rebuilds because the
+	// reused generation cannot produce bytes before its origin.
+	if (trackChange || (seekReanchor && seekReanchorWithinActiveWindowV3(record.CurrentPlan, req.PositionSeconds))) &&
+		h.hasActiveReusableTransportV3(session, record.CurrentPlan.Delivery) {
 		proxyAllowed := mode.proxyEgress || (!mode.headerAuth && h.JWTSecret != "")
 		policy := h.playbackRoutingPolicyForContextV3(r.Context())
 		if reusedRecipe, ok := sidecarOnlyReuseReplanV3(record, result.Plan, artifactRecipe, req.ClientPlaybackContext.Output.OutputContextID); ok &&
@@ -6078,6 +6088,22 @@ func reuseEligibleDeliveryV3(delivery playback.DeliveryV3) bool {
 	return delivery == playback.DeliveryRemuxProgressiveV3 ||
 		delivery == playback.DeliveryRemuxHLSV3 ||
 		delivery == playback.DeliveryTranscodeHLSV3
+}
+
+// seekReanchorWithinActiveWindowV3 reports whether a seek target can be served
+// by the active transport's window. A target before the window start needs a
+// fresh generation (the reused one cannot produce bytes before its origin); a
+// target past the produced head is deliberately allowed through, because the
+// segment layer restarts FFmpeg in place for it. A closed window end is
+// honored so reuse never claims a range the transport no longer serves.
+func seekReanchorWithinActiveWindowV3(plan playback.PlanV3, position float64) bool {
+	if plan.Timeline.SeekWindowStartSeconds != nil && position < *plan.Timeline.SeekWindowStartSeconds {
+		return false
+	}
+	if plan.Timeline.SeekWindowEndSeconds != nil && position > *plan.Timeline.SeekWindowEndSeconds {
+		return false
+	}
+	return true
 }
 
 // sameExecutableAVRecipeV3 reports whether two frozen A/V recipes are equivalent.

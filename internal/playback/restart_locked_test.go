@@ -236,3 +236,99 @@ func TestRestartSessionLocked_SupersededWhenReplaced(t *testing.T) {
 		t.Fatal("the live session must be untouched by a stale restart")
 	}
 }
+
+// A copy-mode segment request past the produced manifest window must restart
+// FFmpeg in place at the bounded estimate for the requested segment instead of
+// reporting an unresolved target. The handler turns "unresolved" into a 404,
+// which forces the client through a full replan (provider re-resolve +
+// transport startup). The fallback begins a fresh emit at the requested
+// segment number using the probed keyframe origin.
+func TestRestartSegmentLocked_CopyForwardJumpRestartsPastProducedWindow(t *testing.T) {
+	dir := t.TempDir()
+	manifest := strings.Join([]string{
+		"#EXTM3U",
+		"#EXT-X-VERSION:7",
+		"#EXT-X-TARGETDURATION:3",
+		"#EXT-X-MEDIA-SEQUENCE:9",
+		"#EXT-X-MAP:URI=\"init.mp4\"",
+		"#EXTINF:2.669000,",
+		"seg_00009.m4s",
+		"#EXTINF:1.669000,",
+		"seg_00010.m4s",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "stream.m3u8"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	argsPath := filepath.Join(dir, "restart-args")
+	ffmpegPath := filepath.Join(dir, "ffmpeg")
+	// The anchor probe runs before the restart; report a real keyframe past the
+	// manifest's last URI (79s) so segmentNumberAtSourceTime cannot align it.
+	ffmpeg := `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "framecrc" ]; then
+    printf '%s\n' '#tb 0: 1/1000'
+    printf '%s\n' '0, 79000, 79000, 41, 1024, 0x12345678'
+    exit 0
+  fi
+done
+printf '%s\n' "$@" > "` + argsPath + `"
+exec sleep 30
+`
+	if err := os.WriteFile(ffmpegPath, []byte(ffmpeg), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
+	}
+
+	s := &TranscodeSession{
+		outputDir: dir,
+		opts: TranscodeOpts{
+			SessionID:              "sess-copy-jump",
+			InputPath:              "/media/movie.mkv",
+			OutputDir:              dir,
+			FFmpegPath:             ffmpegPath,
+			SeekSeconds:            18.261,
+			StreamOriginSeconds:    18,
+			CopySeekAnchorResolved: true,
+			TargetCodecVideo:       "copy",
+			TargetCodecAudio:       "copy",
+			SegmentDuration:        2,
+			StartSegmentNumber:     9,
+			TotalDuration:          120,
+		},
+	}
+	m := NewTranscodeManager()
+	m.RegisterTranscodeSession("sess-copy-jump", s)
+	t.Cleanup(func() { _ = s.Close() })
+
+	const requested = 40
+	target, ok, err := m.RestartSegmentLocked(context.Background(), "sess-copy-jump", s, requested)
+	if err != nil {
+		t.Fatalf("RestartSegmentLocked: %v", err)
+	}
+	if !ok {
+		t.Fatal("RestartSegmentLocked returned ok=false for a segment inside the seek envelope")
+	}
+	// base 18 + (40-9)*2 = 80, inside the 120s envelope.
+	if math.Abs(target.SeekSeconds-80) > 0.0001 || math.Abs(target.StreamOriginSeconds-79) > 0.0001 ||
+		target.StartSegmentNumber != requested || !target.CopySeekAnchorResolved {
+		t.Fatalf("restart target = %+v, want seek=80 origin=79 start=%d resolved=true", target, requested)
+	}
+
+	// The restart must spawn FFmpeg at the requested segment. Wait on the
+	// observable argument file rather than a fixed sleep.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		args, readErr := os.ReadFile(argsPath)
+		if readErr == nil && strings.Contains(string(args), "-ss\n80.000\n") && strings.Contains(string(args), "-start_number\n40\n") {
+			break
+		}
+		if time.Now().After(deadline) {
+			if readErr != nil {
+				t.Fatalf("read restart args: %v", readErr)
+			}
+			t.Fatalf("restart args do not target the requested segment:\n%s", args)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

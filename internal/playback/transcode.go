@@ -3600,9 +3600,25 @@ func (s *TranscodeSession) ResolveSegmentRecoveryTarget(ctx context.Context, seg
 	if err != nil {
 		return SegmentRecoveryTarget{}, false, err
 	}
-	startSegmentNumber, ok, err := s.segmentNumberAtSourceTime(streamOriginSeconds)
-	if err != nil || !ok {
-		return SegmentRecoveryTarget{}, ok, err
+	startSegmentNumber, mapped, err := s.segmentNumberAtSourceTime(streamOriginSeconds)
+	if err != nil {
+		return SegmentRecoveryTarget{}, false, err
+	}
+	if !mapped {
+		// The probed anchor lies past every URI in the current manifest (or
+		// between boundaries). Only a segment the manifest does not list at
+		// all is the bounded forward jump RestartSeekTarget accepted; an
+		// in-manifest segment whose anchor could not be aligned keeps the
+		// retryable miss and lets the session finish producing real timing.
+		if _, inManifest, segmentErr := s.SegmentStartTime(segNum); segmentErr != nil {
+			return SegmentRecoveryTarget{}, false, segmentErr
+		} else if inManifest {
+			return SegmentRecoveryTarget{}, false, nil
+		}
+		if _, bounded := s.copyForwardJumpSeekTarget(segNum); !bounded {
+			return SegmentRecoveryTarget{}, false, nil
+		}
+		startSegmentNumber = segNum
 	}
 
 	target.StreamOriginSeconds = streamOriginSeconds
@@ -3632,6 +3648,16 @@ func (s *TranscodeSession) RestartSeekTarget(segNum int) (float64, bool, error) 
 		// unresolved (0, false, nil) rather than guessing. The caller treats
 		// this as a retryable miss so the session keeps producing manifest
 		// until real timing is available.
+		//
+		// A forward jump past the produced head is the bounded exception:
+		// when the session knows the media duration, restart FFmpeg in place
+		// at the estimated position for the requested segment instead of
+		// forcing the client through a 404 -> replan -> provider re-resolve
+		// -> transport startup cycle. Unknown-duration and before-start
+		// targets still report unresolved.
+		if seekSeconds, bounded := s.copyForwardJumpSeekTarget(segNum); bounded {
+			return seekSeconds, true, nil
+		}
 		return 0, false, nil
 	}
 
@@ -3640,6 +3666,34 @@ func (s *TranscodeSession) RestartSeekTarget(segNum int) (float64, bool, error) 
 		segDuration = opts.SegmentDuration
 	}
 	return float64(segNum * segDuration), true, nil
+}
+
+// copyForwardJumpSeekTarget estimates the source-timeline position for a
+// copy-mode segment beyond the produced manifest window. The current
+// generation begins at StreamOriginSeconds (or SeekSeconds when no keyframe
+// origin was resolved) with StartSegmentNumber as its first URI, so the delta
+// to the requested segment is the nominal segment duration. The estimate is
+// only valid when the media duration is known and it lands inside that
+// envelope, so a target before the session start or past the end never
+// fabricates a position.
+func (s *TranscodeSession) copyForwardJumpSeekTarget(segNum int) (float64, bool) {
+	opts := s.Opts()
+	if opts.TotalDuration <= 0 || segNum < opts.StartSegmentNumber {
+		return 0, false
+	}
+	segDuration := opts.SegmentDuration
+	if segDuration <= 0 {
+		segDuration = defaultSegmentDuration
+	}
+	base := opts.SeekSeconds
+	if opts.CopySeekAnchorResolved {
+		base = opts.StreamOriginSeconds
+	}
+	seekSeconds := base + float64(segNum-opts.StartSegmentNumber)*float64(segDuration)
+	if seekSeconds <= 0 || seekSeconds > opts.TotalDuration {
+		return 0, false
+	}
+	return seekSeconds, true
 }
 
 // ReportSegmentDownloaded records that the client has downloaded the given
