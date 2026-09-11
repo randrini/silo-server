@@ -23,6 +23,15 @@ const (
 	maxFFprobeOutputBytes = 8 << 20
 	maxFFprobeStreams     = 256
 	maxFFprobeChapters    = 10000
+
+	// ffprobe's default analysis window (5 s / 5 MB) can finish against a
+	// relayed provider stream before any audio or video stream is visible:
+	// ffprobe exits 0 with an empty stream table, which callers then persist as
+	// a successful probe. These limits exceed the playback pipelines' caps
+	// (3 s / 5 MB — see playback/transcode.go and playback/remux.go) so the
+	// metadata probe sees the same stream table playback does.
+	probeAnalyzeDuration = "10M" // 10 s (10,000,000 us)
+	probeSizeLimit       = "32M" // 32 MiB
 )
 
 var errFFprobeOutputTooLarge = fmt.Errorf("ffprobe output exceeds %d bytes", maxFFprobeOutputBytes)
@@ -87,17 +96,26 @@ type ffprobeChapter struct {
 type ffprobeSideData = mediaprobe.SideData
 type ffprobeDisp = mediaprobe.Disposition
 
-// ProbeFile runs ffprobe on the given file and returns parsed ProbeData.
-// ffprobePath is the path to the ffprobe binary. filePath is the media file to probe.
-func ProbeFile(ctx context.Context, ffprobePath string, filePath string) (*ProbeData, error) {
-	cmd := exec.CommandContext(ctx, ffprobePath,
+// buildProbeArgs returns the bounded metadata-probe argv for ffprobe. It is
+// split out so tests can assert the remote-stream analysis limits without
+// executing a process.
+func buildProbeArgs(filePath string) []string {
+	return []string{
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
 		"-show_chapters",
+		"-probesize", probeSizeLimit,
+		"-analyzeduration", probeAnalyzeDuration,
 		filePath,
-	)
+	}
+}
+
+// ProbeFile runs ffprobe on the given file and returns parsed ProbeData.
+// ffprobePath is the path to the ffprobe binary. filePath is the media file to probe.
+func ProbeFile(ctx context.Context, ffprobePath string, filePath string) (*ProbeData, error) {
+	cmd := exec.CommandContext(ctx, ffprobePath, buildProbeArgs(filePath)...)
 
 	output := &boundedProbeBuffer{limit: maxFFprobeOutputBytes}
 	cmd.Stdout = output

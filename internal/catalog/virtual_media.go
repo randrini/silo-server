@@ -1449,7 +1449,12 @@ func upsertVirtualFileWithMeta(ctx context.Context, tx pgx.Tx, contentID, episod
 			UPDATE media_files SET
 				file_path=$4, file_size=$11, container=$12, media_folder_id=$3,
 				probe_source=CASE WHEN probe_source='virtual_collection' THEN probe_source ELSE 'virtual' END,
-				probe_updated_at=now(), missing_since=NULL, updated_at=now(),
+				-- Registration stores the row and its declared display hints; it
+				-- is not a probe. Preserve the existing probe_updated_at: a
+				-- never-probed row stays NULL (so the repair gate can see it
+				-- needs a real probe) and an already-probed row keeps its value.
+				probe_updated_at=CASE WHEN probe_updated_at IS NULL THEN NULL ELSE probe_updated_at END,
+				missing_since=NULL, updated_at=now(),
 				resolution=NULLIF($6,''), codec_video=NULLIF($7,''), codec_audio=NULLIF($8,''),
 				hdr=$9, bitrate=NULLIF($10,0),
 				duration=CASE
@@ -1471,7 +1476,7 @@ func upsertVirtualFileWithMeta(ctx context.Context, tx pgx.Tx, contentID, episod
 		INSERT INTO media_files(
 			content_id,episode_id,media_folder_id,file_path,file_size,container,duration,probe_source,probe_updated_at,
 			resolution,codec_video,codec_audio,hdr,bitrate,audio_tracks,subtitle_tracks,virtual_owner_installation_id
-		) VALUES($1,NULLIF($2,''),$3,$4,$11,$12,COALESCE(NULLIF($5,0),(SELECT runtime * 60 FROM episodes WHERE content_id = NULLIF($2,'')),(SELECT runtime * 60 FROM media_items WHERE content_id = $1 AND NULLIF($2,'') IS NULL)),'virtual',now(),NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,NULLIF($10,0),COALESCE((SELECT jsonb_agg(jsonb_build_object('language', x)) FROM unnest($13::text[]) x),'[]'::jsonb),COALESCE((SELECT jsonb_agg(jsonb_build_object('language', x)) FROM unnest($14::text[]) x),'[]'::jsonb),$15)
+		) VALUES($1,NULLIF($2,''),$3,$4,$11,$12,COALESCE(NULLIF($5,0),(SELECT runtime * 60 FROM episodes WHERE content_id = NULLIF($2,'')),(SELECT runtime * 60 FROM media_items WHERE content_id = $1 AND NULLIF($2,'') IS NULL)),'virtual',NULL,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,NULLIF($10,0),COALESCE((SELECT jsonb_agg(jsonb_build_object('language', x)) FROM unnest($13::text[]) x),'[]'::jsonb),COALESCE((SELECT jsonb_agg(jsonb_build_object('language', x)) FROM unnest($14::text[]) x),'[]'::jsonb),$15)
 		ON CONFLICT (file_path, virtual_owner_installation_id, media_folder_id) WHERE virtual_owner_installation_id IS NOT NULL DO UPDATE SET
 			content_id=EXCLUDED.content_id,
 			episode_id=EXCLUDED.episode_id,
@@ -1482,7 +1487,9 @@ func upsertVirtualFileWithMeta(ctx context.Context, tx pgx.Tx, contentID, episod
 				WHEN media_files.probe_source='virtual_collection' THEN media_files.probe_source
 				ELSE 'virtual'
 			END,
-			probe_updated_at=now(),
+			-- Registration is not a probe: preserve the target row's
+			-- probe_updated_at instead of stamping a probe that never ran.
+			probe_updated_at=CASE WHEN media_files.probe_updated_at IS NULL THEN NULL ELSE media_files.probe_updated_at END,
 			missing_since=NULL,
 			updated_at=now(),
 			resolution=EXCLUDED.resolution,
@@ -1537,7 +1544,12 @@ func upsertVirtualFileVariant(ctx context.Context, tx pgx.Tx, contentID, episode
 			UPDATE media_files SET
 				file_path=$4, file_size=$12, container=$13, media_folder_id=$3,
 				probe_source=CASE WHEN probe_source='virtual_collection' THEN probe_source ELSE 'virtual' END,
-				probe_updated_at=now(), missing_since=NULL, updated_at=now(),
+				-- Registration stores the row and its declared display hints; it
+				-- is not a probe. Preserve the existing probe_updated_at: a
+				-- never-probed row stays NULL (so the repair gate can see it
+				-- needs a real probe) and an already-probed row keeps its value.
+				probe_updated_at=CASE WHEN probe_updated_at IS NULL THEN NULL ELSE probe_updated_at END,
+				missing_since=NULL, updated_at=now(),
 				resolution=NULLIF($6,''), codec_video=NULLIF($7,''), codec_audio=NULLIF($8,''),
 				hdr=$9, bitrate=NULLIF($10,0), edition_raw=$11, release_name='', release_group='',
 				duration=CASE
@@ -1558,7 +1570,7 @@ func upsertVirtualFileVariant(ctx context.Context, tx pgx.Tx, contentID, episode
 		INSERT INTO media_files(
 			content_id,episode_id,media_folder_id,file_path,file_size,container,duration,probe_source,probe_updated_at,
 			resolution,codec_video,codec_audio,hdr,bitrate,edition_raw,release_name,release_group,audio_tracks,subtitle_tracks,virtual_owner_installation_id
-		) VALUES($1,NULLIF($2,''),$3,$4,$12,$13,COALESCE(NULLIF($5,0),(SELECT runtime * 60 FROM episodes WHERE content_id = NULLIF($2,'')),(SELECT runtime * 60 FROM media_items WHERE content_id = $1 AND NULLIF($2,'') IS NULL)),'virtual',now(),NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,NULLIF($10,0),$11,'','',COALESCE((SELECT jsonb_agg(jsonb_build_object('language', x)) FROM unnest($14::text[]) x),'[]'::jsonb),COALESCE((SELECT jsonb_agg(jsonb_build_object('language', x)) FROM unnest($15::text[]) x),'[]'::jsonb),$16)
+		) VALUES($1,NULLIF($2,''),$3,$4,$12,$13,COALESCE(NULLIF($5,0),(SELECT runtime * 60 FROM episodes WHERE content_id = NULLIF($2,'')),(SELECT runtime * 60 FROM media_items WHERE content_id = $1 AND NULLIF($2,'') IS NULL)),'virtual',NULL,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),$9,NULLIF($10,0),$11,'','',COALESCE((SELECT jsonb_agg(jsonb_build_object('language', x)) FROM unnest($14::text[]) x),'[]'::jsonb),COALESCE((SELECT jsonb_agg(jsonb_build_object('language', x)) FROM unnest($15::text[]) x),'[]'::jsonb),$16)
 		ON CONFLICT (file_path, virtual_owner_installation_id, media_folder_id) WHERE virtual_owner_installation_id IS NOT NULL DO UPDATE SET
 			content_id=EXCLUDED.content_id,
 			episode_id=EXCLUDED.episode_id,
@@ -1569,7 +1581,9 @@ func upsertVirtualFileVariant(ctx context.Context, tx pgx.Tx, contentID, episode
 				WHEN media_files.probe_source='virtual_collection' THEN media_files.probe_source
 				ELSE 'virtual'
 			END,
-			probe_updated_at=now(),
+			-- Registration is not a probe: preserve the target row's
+			-- probe_updated_at instead of stamping a probe that never ran.
+			probe_updated_at=CASE WHEN media_files.probe_updated_at IS NULL THEN NULL ELSE media_files.probe_updated_at END,
 			missing_since=NULL,
 			updated_at=now(),
 			resolution=EXCLUDED.resolution,

@@ -135,18 +135,15 @@ export function AudioTrackMenu({
 
   if (tracks.length === 0) return null;
 
-  const disabled = tracks.length <= 1;
-
   return (
     <div ref={menuRef} className="relative" onBlur={handleBlur}>
       {!hideTrigger && (
         <button
           type="button"
-          className={`player-utility-btn ${disabled ? "cursor-default opacity-40" : ""}`}
-          onClick={disabled ? undefined : () => setOpen((v) => !v)}
+          className="player-utility-btn"
+          onClick={() => setOpen((v) => !v)}
           aria-label="Audio tracks"
           aria-expanded={open}
-          aria-disabled={disabled}
           aria-haspopup="menu"
         >
           <AudioLines className="h-[18px] w-[18px]" />

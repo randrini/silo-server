@@ -1206,7 +1206,7 @@ func (r *FileRepository) ReplaceVirtualCandidates(ctx context.Context, source *m
 			) VALUES (
 				$1, NULLIF($2,''), $3, $4, $5,
 				NULLIF($6,''), NULLIF($7,''), NULLIF($8,''), $9, 'virtual',
-				NULLIF($10,0), $11, '', '', $12, $13, 'virtual', NOW(), $14
+				NULLIF($10,0), $11, '', '', $12, $13, 'virtual', NULL, $14
 			)
 			ON CONFLICT (file_path, virtual_owner_installation_id, media_folder_id)
 				WHERE virtual_owner_installation_id IS NOT NULL
@@ -1227,7 +1227,10 @@ func (r *FileRepository) ReplaceVirtualCandidates(ctx context.Context, source *m
 				audio_tracks=EXCLUDED.audio_tracks,
 				subtitle_tracks=EXCLUDED.subtitle_tracks,
 				probe_source='virtual',
-				probe_updated_at=NOW(),
+				-- Registration is not a probe: preserve any existing real probe
+				-- timestamp (NULL stays NULL) so the probe repair gate can fill
+				-- real track inventory later.
+				probe_updated_at = CASE WHEN media_files.probe_updated_at IS NULL THEN NULL ELSE media_files.probe_updated_at END,
 				missing_since=NULL,
 				-- A fresh listing means the provider still offers this release;
 				-- the failed flag is a runtime signal, not a permanent verdict.

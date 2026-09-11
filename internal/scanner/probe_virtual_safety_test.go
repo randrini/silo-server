@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,6 +40,23 @@ printf '%s' '{"format":{"format_name":"matroska","duration":"120"},"streams":[{"
 	}
 	if !called || len(probed.VideoTracks) != 1 || probed.VideoTracks[0].DVRPUStrippable == nil || *probed.VideoTracks[0].DVRPUStrippable {
 		t.Fatalf("DV safety verdict was not preserved: %+v", probed.VideoTracks)
+	}
+}
+
+func TestProbeVirtualSourceRejectsSuccessfulProbeWithNoStreams(t *testing.T) {
+	ffprobe := writeExecutable(t, "ffprobe", `#!/bin/sh
+printf '%s' '{"format":{"format_name":"matroska","duration":"120"},"streams":[]}'
+`)
+	file := &models.MediaFile{ID: 9, FilePath: "virtual://movie/tt9?result=empty"}
+	probed, err := ProbeVirtualSource(context.Background(), ffprobe, "", "http://127.0.0.1/source", file, nil)
+	if !errors.Is(err, errVirtualProbeNoTracks) {
+		t.Fatalf("ProbeVirtualSource error = %v, want errVirtualProbeNoTracks", err)
+	}
+	if probed != file {
+		t.Fatal("ProbeVirtualSource must return the original file on a failed probe")
+	}
+	if probed.ProbeUpdatedAt != nil {
+		t.Fatalf("ProbeUpdatedAt = %v, want nil (no probe was recorded)", probed.ProbeUpdatedAt)
 	}
 }
 
