@@ -111,4 +111,55 @@ describe("AudioTrackMenu", () => {
     fireEvent.click(secondEntry);
     expect(onSelect).toHaveBeenCalledWith(1, 0);
   });
+
+  it("collapses identical descriptors and selects the first entry's original slot", () => {
+    const onSelect = vi.fn();
+    const tracks = [
+      ...Array.from({ length: 7 }, (_, i) => ({
+        title: `Track ${i}`,
+        codec: "aac",
+        channels: 2,
+        language: `l${i}`,
+        index: i,
+      })),
+      // Same descriptor at two container indexes (7 and 9), as a probed
+      // multi-language release can carry. The first wins.
+      { title: "English AC3", codec: "ac3", channels: 6, language: "en", index: 7 },
+      { title: "Commentary", codec: "ac3", channels: 2, language: "en", index: 8 },
+      { title: "English AC3", codec: "ac3", channels: 6, language: "en", index: 9 },
+    ];
+
+    render(
+      createElement(AudioTrackMenu, {
+        tracks,
+        activeIndex: 7,
+        onSelect,
+        currentPosition: 0,
+        open: true,
+        onOpenChange: () => {},
+        hideTrigger: true,
+      }),
+    );
+
+    const entries = screen.getAllByRole("menuitem");
+    // One duplicate collapsed: 10 tracks become 9 rows.
+    expect(entries).toHaveLength(9);
+    // The retained English entry keeps inventory slot 7, and its active state
+    // still matches the plan's selection.
+    const retained = entries[7]!;
+    expect(retained).toHaveTextContent("English AC3");
+    expect(retained).toHaveClass("text-blue-400");
+
+    fireEvent.click(retained);
+    expect(onSelect).toHaveBeenCalledWith(7, 0);
+  });
+
+  it("does not collapse tracks that differ in language", () => {
+    renderMenu([
+      { title: "English", codec: "ac3", channels: 6, language: "en" },
+      { title: "English", codec: "ac3", channels: 6, language: "es" },
+    ]);
+
+    expect(screen.getAllByRole("menuitem")).toHaveLength(2);
+  });
 });

@@ -10,6 +10,7 @@ import { playerFetch } from "../player-fetch";
 import { getLanguageName } from "../utils/languageNames";
 import { sortSubtitlesBySource } from "../utils/subtitleSort";
 import { getSubtitleFormatLabel, isSubtitleFormatLabel } from "../utils/subtitleCodecs";
+import { dedupeSubtitleTracks } from "../utils/trackDedupe";
 import { isTranslatableSource } from "./subtitleTranslateRequest";
 import { PlayerMenuSurface } from "./PlayerMenuSurface";
 
@@ -65,7 +66,10 @@ export function SubtitleMenu({
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const sortedTracks = useMemo(() => sortSubtitlesBySource(tracks), [tracks]);
+  // Probed inventories can repeat the same subtitle stream at several container
+  // indexes; the menu shows one row per distinct descriptor, keeping the first
+  // ordinal for selection. Differing forced/hearing-impaired/flag rows stay.
+  const sortedTracks = useMemo(() => dedupeSubtitleTracks(sortSubtitlesBySource(tracks)), [tracks]);
 
   // Discover whether the server has AI subtitle translation configured, so we
   // only surface the entry point when it can actually do something. This is a

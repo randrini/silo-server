@@ -92,6 +92,13 @@ export interface PlayerVideoTrack {
 }
 
 export interface PlayerAudioTrack {
+  /**
+   * Absolute container stream index as ffprobe reported it, when the server
+   * publishes one. This is metadata, NOT the selection ordinal: the player
+   * selects audio by the track's position in the inventory. A synthesized
+   * virtual track carries no index.
+   */
+  index?: number;
   title?: string;
   embedded_title?: string;
   language?: string;

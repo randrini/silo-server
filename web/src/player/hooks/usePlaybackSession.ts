@@ -122,6 +122,18 @@ export interface UsePlaybackSessionResult extends PlaybackSessionState {
   refreshSubtitles: (currentPosition: number) => void;
   /** Folds a realtime-delivered inventory entry in without a server round trip. */
   applySubtitleTrack: (track: SubtitleInventoryItemV3) => void;
+  /**
+   * Folds a richer probed audio inventory read from the live catalog into the
+   * menu without touching the plan or the transport.
+   *
+   * A session that started before probe repair carries the synthesized
+   * inventory the server had then. Polling the catalog later can reveal the
+   * file's real tracks; this adopts them for rendering only. It never bumps
+   * `planRevision`/`transportRevision`, so the stream is not reloaded, and the
+   * plan stays the source of truth: a request no richer than the plan's current
+   * inventory is ignored.
+   */
+  applyAudioInventory: (tracks: PlayerAudioTrack[]) => void;
   /** Keeps transport state current for output-capability replans. */
   updatePlaybackState: (positionSeconds: number, playing: boolean) => void;
   /** Reports a playback route event as a diagnostic. Never affects playback. */
@@ -1408,6 +1420,23 @@ export function usePlaybackSession(
     [config],
   );
 
+  /**
+   * Fills in a richer probed audio inventory discovered after the plan landed.
+   *
+   * Only a strict superset is accepted: once the plan carries a full inventory
+   * it stays authoritative, so a poorer catalog row (for example the requested
+   * version after the server fell back to another) never overwrites it. The plan
+   * object and its revisions are untouched, so menus re-render while the
+   * transport keeps playing.
+   */
+  const applyAudioInventory = useCallback((tracks: PlayerAudioTrack[]) => {
+    if (tracks.length === 0) return;
+    setState((current) => {
+      if (tracks.length <= current.planAudioTracks.length) return current;
+      return { ...current, planAudioTracks: tracks.map((track) => ({ ...track })) };
+    });
+  }, []);
+
   const updatePlaybackState = useCallback((positionSeconds: number, playing: boolean) => {
     if (Number.isFinite(positionSeconds) && positionSeconds >= 0) {
       const isUninitializedPlayerZero =
@@ -1486,6 +1515,7 @@ export function usePlaybackSession(
     reanchorSeek,
     refreshSubtitles,
     applySubtitleTrack,
+    applyAudioInventory,
     updatePlaybackState,
     reportEvent,
   };

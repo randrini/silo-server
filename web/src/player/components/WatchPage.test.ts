@@ -1,19 +1,23 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fixturePlanV3 } from "../protocol-v3.fixtures";
 import { derivePersistedSubtitleMode } from "../utils/subtitleMode";
 import type { UsePlaybackSessionResult } from "../hooks/usePlaybackSession";
-import type { PlayerFileVersion, WatchPageProps } from "../types";
+import type { PlayerAudioTrack, PlayerFileVersion, WatchPageProps } from "../types";
 import { WatchPage } from "./WatchPage";
 
 const playbackSessionMock = vi.hoisted(() => vi.fn());
 const videoPlayerMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
+const fetchWatchDetailMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../hooks/usePlaybackSession", () => ({
   usePlaybackSession: playbackSessionMock,
+}));
+vi.mock("@/hooks/queries/items", () => ({
+  fetchWatchDetail: fetchWatchDetailMock,
 }));
 vi.mock("./VideoPlayer", () => ({
   VideoPlayer: (props: unknown) => {
@@ -101,6 +105,7 @@ function playbackSession(
     reanchorSeek: vi.fn(),
     refreshSubtitles: vi.fn(),
     applySubtitleTrack: vi.fn(),
+    applyAudioInventory: vi.fn(),
     updatePlaybackState: vi.fn(),
     reportEvent: vi.fn(),
     ...overrides,
@@ -340,5 +345,135 @@ describe("WatchPage version switch feedback", () => {
         "Playing a different version than selected — the requested version isn't playable on this device.",
       ),
     ).not.toBeInTheDocument();
+  });
+});
+
+const planSubtitle = {
+  index: 0,
+  language: "en",
+  codec: "srt",
+  label: "English",
+  source: "embedded" as const,
+  url: "/api/v1/stream/session-1/subtitles/0.vtt",
+};
+
+const richerAudioTracks: PlayerAudioTrack[] = [
+  { codec: "eac3", channels: 6, layout: "5.1", language: "eng", default: true },
+  { codec: "ac3", channels: 6, layout: "5.1", language: "spa", index: 9 },
+];
+
+const virtualVersion: PlayerFileVersion = { ...version, container: "virtual" };
+
+describe("WatchPage live inventory refresh", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fetchWatchDetailMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("polls only an incomplete virtual audio inventory and fills it in", async () => {
+    const applyAudioInventory = vi.fn();
+    const switchVersion = vi.fn();
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [planSubtitle],
+        applyAudioInventory,
+        switchVersion,
+      }),
+    );
+    fetchWatchDetailMock.mockResolvedValue({
+      versions: [{ ...virtualVersion, audio_tracks: richerAudioTracks }],
+    });
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualVersion] }));
+
+    // Nothing is fetched before the first interval.
+    expect(fetchWatchDetailMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+
+    expect(fetchWatchDetailMock).toHaveBeenCalledTimes(1);
+    expect(applyAudioInventory).toHaveBeenCalledWith(richerAudioTracks);
+    // Menu data only: no restart or stream swap.
+    expect(switchVersion).not.toHaveBeenCalled();
+    const playerProps = videoPlayerMock.mock.calls.at(-1)?.[0] as { streamUrl?: string };
+    expect(playerProps.streamUrl).toBe("/stream/session-1");
+  });
+
+  it("does not poll a local file or a complete inventory", async () => {
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [planSubtitle],
+      }),
+    );
+
+    render(createElement(WatchPage, watchPageProps));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(fetchWatchDetailMock).not.toHaveBeenCalled();
+  });
+
+  it("requests a subtitle replan when the catalog gains tracks the plan lacks", async () => {
+    const refreshSubtitles = vi.fn();
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        planAudioTracks: richerAudioTracks,
+        subtitleUrls: [],
+        refreshSubtitles,
+      }),
+    );
+    fetchWatchDetailMock.mockResolvedValue({
+      versions: [
+        {
+          ...virtualVersion,
+          subtitle_tracks: [{ index: 13, language: "en", codec: "pgs", title: "English" }],
+        },
+      ],
+    });
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualVersion] }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+
+    expect(refreshSubtitles).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after the attempt cap when the inventory never fills in", async () => {
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [],
+      }),
+    );
+    // The catalog never grows past the plan's single track.
+    fetchWatchDetailMock.mockResolvedValue({
+      versions: [
+        {
+          ...virtualVersion,
+          audio_tracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        },
+      ],
+    });
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualVersion] }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000 * 10);
+    });
+
+    // One attempt per interval, capped at five.
+    expect(fetchWatchDetailMock).toHaveBeenCalledTimes(5);
   });
 });

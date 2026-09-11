@@ -16,6 +16,15 @@ import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import { useWatchTogetherRoomConnection } from "../hooks/useWatchTogetherRoomConnection";
 import { toast } from "sonner";
 
+/**
+ * Live inventory refresh. A session that started before the server finished
+ * probing a virtual file carries the synthesized inventory the plan had then.
+ * These bound how often the client re-reads the catalog to fill the menus in.
+ * The poll only ever updates menu data; it never restarts the stream.
+ */
+export const INVENTORY_REFRESH_INTERVAL_MS = 20_000;
+export const INVENTORY_REFRESH_MAX_ATTEMPTS = 5;
+
 function patchChapterThumbnail(
   versions: PlayerFileVersion[],
   fileId: number,
@@ -107,6 +116,7 @@ export function WatchPage({
   const playbackController = useWatchPlaybackController();
   const chapterRefreshAttemptsRef = useRef<Set<number>>(new Set());
   const handledSelectionRevisionRef = useRef<number | null>(null);
+  const playbackPositionRef = useRef(initialPosition ?? 0);
   const markerRealtimeReconcileKeyRef = useRef<string | null>(null);
   const [playbackVersions, setPlaybackVersions] = useState(versions);
   const [versionSwapNoticeDismissed, setVersionSwapNoticeDismissed] = useState(false);
@@ -139,6 +149,9 @@ export function WatchPage({
     explicitFileSelection,
     forceRelink,
   );
+
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
   const initialSubtitleErrorKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -200,11 +213,86 @@ export function WatchPage({
   const updatePlaybackState = session.updatePlaybackState;
   const handlePlaybackStateChange = useCallback(
     (state: PlayerPlaybackStateChange) => {
+      playbackPositionRef.current = state.currentTime;
       updatePlaybackState(state.currentTime, state.playing);
       onPlaybackStateChange?.(state);
     },
     [onPlaybackStateChange, updatePlaybackState],
   );
+
+  // Audio is complete once a virtual file has a real multi-track inventory (or
+  // the file is local); subtitles once the plan publishes any inventory.
+  const isVirtualActiveFile = activePlaybackVersion?.container === "virtual";
+
+  const applyAudioInventory = session.applyAudioInventory;
+  const refreshSubtitles = session.refreshSubtitles;
+  useEffect(() => {
+    if (!session.sessionId || !session.mediaFileId || session.loading || session.replacing) {
+      return;
+    }
+
+    const needsAudio = isVirtualActiveFile && session.planAudioTracks.length <= 1;
+    const needsSubtitles = session.subtitleUrls.length === 0;
+    if (!needsAudio && !needsSubtitles) return;
+
+    const mediaFileId = session.mediaFileId;
+    let cancelled = false;
+    let attempts = 0;
+    let timer: number | null = null;
+    let audioComplete = !needsAudio;
+    let subtitlesComplete = !needsSubtitles;
+
+    const poll = async () => {
+      attempts += 1;
+      try {
+        const detail = await fetchWatchDetail(contentId, mediaFileId, libraryId);
+        if (cancelled) return;
+        const current = sessionRef.current;
+        const version = detail.versions.find((candidate) => candidate.file_id === mediaFileId);
+        if (version) {
+          const nextAudioTracks = version.audio_tracks ?? [];
+          if (nextAudioTracks.length > current.planAudioTracks.length) {
+            applyAudioInventory(nextAudioTracks);
+            audioComplete = true;
+          }
+          const nextSubtitleTracks = version.subtitle_tracks ?? [];
+          if (current.subtitleUrls.length === 0 && nextSubtitleTracks.length > 0) {
+            // The catalog carries no playable URLs; a no-op track_change
+            // replan re-reads the plan's inventory (URLs included) without
+            // changing the A/V transport, so the stream keeps playing.
+            refreshSubtitles(playbackPositionRef.current);
+            subtitlesComplete = true;
+          }
+        }
+      } catch {
+        // Best effort; a later attempt may still succeed.
+      }
+      if (cancelled || (audioComplete && subtitlesComplete)) return;
+      if (attempts >= INVENTORY_REFRESH_MAX_ATTEMPTS) return;
+      timer = window.setTimeout(() => void poll(), INVENTORY_REFRESH_INTERVAL_MS);
+    };
+
+    timer = window.setTimeout(() => void poll(), INVENTORY_REFRESH_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+    // The track counts that gate the poll are read once when it starts. They
+    // are deliberately not dependencies: filling the inventory in must not
+    // restart the attempt budget.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    applyAudioInventory,
+    contentId,
+    isVirtualActiveFile,
+    libraryId,
+    refreshSubtitles,
+    session.loading,
+    session.mediaFileId,
+    session.replacing,
+    session.sessionId,
+  ]);
 
   /**
    * Persists an in-player subtitle choice for the whole series.

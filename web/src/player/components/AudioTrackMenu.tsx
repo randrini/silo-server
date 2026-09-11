@@ -7,6 +7,7 @@ import {
   compactAudioMeta,
   formatLanguageName,
 } from "@/pages/ItemDetail/components/versionFormatUtils";
+import { dedupeAudioTracks } from "../utils/trackDedupe";
 import { PlayerMenuSurface } from "./PlayerMenuSurface";
 
 interface AudioTrackMenuProps {
@@ -135,6 +136,12 @@ export function AudioTrackMenu({
 
   if (tracks.length === 0) return null;
 
+  // Probed inventories can repeat the same stream at several container
+  // indexes; the menu shows one row per distinct descriptor. The retained
+  // entry keeps its original inventory position so selection still names the
+  // track the server has at that slot.
+  const dedupedTracks = dedupeAudioTracks(tracks);
+
   return (
     <div ref={menuRef} className="relative" onBlur={handleBlur}>
       {!hideTrigger && (
@@ -159,7 +166,7 @@ export function AudioTrackMenu({
           <div className="px-3 py-1.5 text-xs font-medium tracking-wide text-white/50 uppercase">
             Audio
           </div>
-          {tracks.map((track, index) => {
+          {dedupedTracks.map(({ track, index }) => {
             const descriptor = describeTrack(track, index);
             const isActive = index === activeIndex;
             return (

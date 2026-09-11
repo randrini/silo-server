@@ -2575,4 +2575,98 @@ describe("usePlaybackSession plan audio inventory", () => {
     expect(result.current.planAudioTracks).toEqual([]);
     unmount();
   });
+
+  it("fills in a richer probed inventory without bumping the plan or transport revision", async () => {
+    const planAudioTracks = [
+      { codec: "eac3", channels: 6, layout: "5.1", language: "eng", default: true },
+    ];
+    const richer = [
+      { codec: "eac3", channels: 6, layout: "5.1", language: "eng", default: true },
+      { codec: "ac3", channels: 6, layout: "5.1", language: "spa", index: 9, default: false },
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3({
+              audio_tracks: planAudioTracks,
+              subtitle: { mode: "off", inventory: [] },
+            }),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan).not.toBeNull());
+
+    const planRevision = result.current.planRevision;
+    const transportRevision = result.current.transportRevision;
+
+    act(() => result.current.applyAudioInventory(richer));
+
+    expect(result.current.planAudioTracks).toEqual(richer);
+    // A menu-data fill-in must not reload the stream.
+    expect(result.current.planRevision).toBe(planRevision);
+    expect(result.current.transportRevision).toBe(transportRevision);
+    expect(result.current.streamUrl).toBe("/api/v1/stream/session-1/master.m3u8?token=token");
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/playback/start")),
+    ).toHaveLength(1);
+    unmount();
+  });
+
+  it("ignores a refreshed inventory no richer than the plan's", async () => {
+    const planAudioTracks = [
+      { codec: "eac3", channels: 6, layout: "5.1", language: "eng", default: true },
+      { codec: "ac3", channels: 6, layout: "5.1", language: "spa", default: false },
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3({ audio_tracks: planAudioTracks }),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan).not.toBeNull());
+
+    act(() =>
+      result.current.applyAudioInventory([
+        { codec: "eac3", channels: 6, layout: "5.1", language: "eng" },
+      ]),
+    );
+
+    expect(result.current.planAudioTracks).toEqual(planAudioTracks);
+    unmount();
+  });
 });
