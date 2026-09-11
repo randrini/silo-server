@@ -101,10 +101,14 @@ describe("AudioTrackMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
     const entries = screen.getAllByRole("menuitem");
     expect(entries).toHaveLength(2);
-    expect(entries[0]).toHaveClass("text-blue-400");
-    expect(entries[1]).not.toHaveClass("text-blue-400");
+    const [firstEntry, secondEntry] = entries;
+    if (!firstEntry || !secondEntry) {
+      throw new Error("expected two menu entries");
+    }
+    expect(firstEntry).toHaveClass("text-blue-400");
+    expect(secondEntry).not.toHaveClass("text-blue-400");
 
-    fireEvent.click(entries[1]);
+    fireEvent.click(secondEntry);
     expect(onSelect).toHaveBeenCalledWith(1, 0);
   });
 });
