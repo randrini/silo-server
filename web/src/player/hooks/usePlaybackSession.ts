@@ -2,7 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlayerConfig } from "../context/PlayerConfigContext";
 import type { PlayerConfig } from "../context/PlayerConfigContext";
 import { playerFetch } from "../player-fetch";
-import { describePlanTerminal, describePlaybackTransportError } from "../playback-errors";
+import {
+  describePlanTerminal,
+  describePlaybackTransportError,
+  type PlaybackPolicyErrorDescription,
+} from "../playback-errors";
 import { useCodecDetection } from "./useCodecDetection";
 import {
   buildClientCapabilitiesV3,
@@ -804,7 +808,7 @@ export function usePlaybackSession(
       attemptedPlanKeysRef.current = [];
       attemptCountRef.current = 1;
 
-      const retirePreviousSession = (nextError?: { title: string; message: string }) => {
+      const retirePreviousSession = (nextError?: PlaybackPolicyErrorDescription) => {
         if (previousSessionId) {
           void stopSession(previousSessionId).catch(() => {
             // Best effort — stale session will time out server-side.
