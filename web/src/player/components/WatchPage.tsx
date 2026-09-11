@@ -401,6 +401,13 @@ export function WatchPage({
     [session.mediaFileId],
   );
 
+  // The server tells us whether a terminal is worth retrying. A retryable
+  // virtual-source refusal gets a Try again action; every other terminal keeps
+  // the plain Go Back dead-end.
+  const canRetryTerminal =
+    !session.plan && session.errorReason === "virtual_source_unavailable" && session.errorRetryable;
+  const retryInFlight = session.retrying;
+
   // The plan is the player's contract: without one there is no transport, no
   // timeline and no track inventory to render against.
   if (!session.plan || !session.streamUrl || !session.sessionId) {
@@ -426,15 +433,29 @@ export function WatchPage({
               {session.error ?? "Silo could not start playback."}
             </p>
           </div>
-          <button
-            onClick={() => {
-              void onExit();
-            }}
-            type="button"
-            className="rounded-[0.95rem] bg-white/10 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-white/20"
-          >
-            Go Back
-          </button>
+          <div className="flex flex-col items-center gap-2">
+            {canRetryTerminal ? (
+              <button
+                onClick={() => {
+                  session.retryStart();
+                }}
+                type="button"
+                disabled={retryInFlight}
+                className="rounded-[0.95rem] bg-white px-4 py-2 text-sm font-semibold text-black transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Try again
+              </button>
+            ) : null}
+            <button
+              onClick={() => {
+                void onExit();
+              }}
+              type="button"
+              className="rounded-[0.95rem] bg-white/10 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-white/20"
+            >
+              Go Back
+            </button>
+          </div>
         </div>
       </div>
     );

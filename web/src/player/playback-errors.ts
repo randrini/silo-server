@@ -4,6 +4,16 @@ import type { TerminalV3 } from "./protocol-v3";
 export interface PlaybackPolicyErrorDescription {
   title: string;
   message: string;
+  /**
+   * The v3 terminal reason, when this describes a refused plan or start rather
+   * than a transport failure. Callers key recovery affordances on it.
+   */
+  reason?: string;
+  /**
+   * Whether the server marked the terminal retryable. Absent for transport
+   * failures, which carry no server retry verdict.
+   */
+  retryable?: boolean;
 }
 
 /**
@@ -14,8 +24,20 @@ export interface PlaybackPolicyErrorDescription {
  * body's `terminal`. The status code only describes the request. So the whole
  * "playback was refused" surface is reason-keyed, and the server's own
  * `terminal.message` is the fallback for reasons this table does not name.
+ *
+ * The reason and the server's retryable verdict ride along on the description
+ * so the UI can offer a retry for the terminals the server says are worth
+ * retrying instead of hard-dead-ending every refusal.
  */
 export function describePlanTerminal(terminal: TerminalV3): PlaybackPolicyErrorDescription {
+  return {
+    ...describeTerminalCopy(terminal),
+    reason: terminal.reason,
+    retryable: terminal.retryable,
+  };
+}
+
+function describeTerminalCopy(terminal: TerminalV3): { title: string; message: string } {
   switch (terminal.reason) {
     case "transcoding_disabled":
       return {
@@ -119,6 +141,15 @@ export function describePlanTerminal(terminal: TerminalV3): PlaybackPolicyErrorD
         message:
           terminal.message?.trim() ||
           "Silo couldn't prepare the selected subtitles for this device. Try a different track.",
+      };
+    case "virtual_source_unavailable":
+      return {
+        title: "Playback unavailable",
+        // The server explains which source could not be resolved; the generic
+        // sentence only covers a missing message. Retryability comes from the
+        // server and is surfaced separately.
+        message:
+          terminal.message?.trim() || "The virtual source could not be resolved for playback.",
       };
     default:
       return {

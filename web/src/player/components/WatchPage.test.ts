@@ -90,9 +90,13 @@ function playbackSession(
     pendingSwitchFileId: null,
     errorTitle: null,
     error: null,
+    errorReason: null,
+    errorRetryable: false,
+    retrying: false,
     initialSubtitleErrorTitle: null,
     initialSubtitleError: null,
     switchVersion: vi.fn(),
+    retryStart: vi.fn(),
     switchAudioTrack: vi.fn(),
     changeSubtitleTrack: vi.fn(),
     changeQuality: vi.fn(),
@@ -152,6 +156,53 @@ describe("WatchPage playback errors", () => {
     expect(screen.getByText("Failed to start playback")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Go Back" })).toBeInTheDocument();
     expect(screen.queryByText("Mounted video player")).not.toBeInTheDocument();
+  });
+
+  it("offers Try again for a retryable virtual-source terminal and keeps Go Back", () => {
+    const retryStart = vi.fn();
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        plan: null,
+        streamUrl: null,
+        sessionId: null,
+        mediaFileId: null,
+        errorTitle: "Playback unavailable",
+        error: "The virtual source could not be resolved for playback.",
+        errorReason: "virtual_source_unavailable",
+        errorRetryable: true,
+        retryStart,
+      }),
+    );
+
+    render(createElement(WatchPage, watchPageProps));
+
+    expect(
+      screen.getByText("The virtual source could not be resolved for playback."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(retryStart).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Go Back" })).toBeInTheDocument();
+  });
+
+  it("keeps a non-retryable terminal a Go Back-only dead-end", () => {
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        plan: null,
+        streamUrl: null,
+        sessionId: null,
+        mediaFileId: null,
+        errorTitle: "This video is no longer available",
+        error: "The file needed to play it can't be found right now.",
+        errorReason: "source_unavailable",
+        errorRetryable: false,
+      }),
+    );
+
+    render(createElement(WatchPage, watchPageProps));
+
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Go Back" })).toBeInTheDocument();
   });
 
   it("keeps a refused initial bitmap subtitle off without treating it as a playback error", () => {
