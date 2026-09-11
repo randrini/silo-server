@@ -29,3 +29,33 @@ func TestBoundedProbeBufferRejectsOverflow(t *testing.T) {
 		t.Fatalf("overflow error = %v", err)
 	}
 }
+
+func TestBuildProbeArgsBoundsRemoteAnalysis(t *testing.T) {
+	const input = "virtual://movie/tt1"
+	args := buildProbeArgs(input)
+
+	for flag, want := range map[string]string{
+		"-probesize":       "32M",
+		"-analyzeduration": "10M",
+	} {
+		got, ok := probeArgValue(args, flag)
+		if !ok {
+			t.Fatalf("buildProbeArgs missing %s: %v", flag, args)
+		}
+		if got != want {
+			t.Fatalf("%s = %q, want %q", flag, got, want)
+		}
+	}
+	if args[len(args)-1] != input {
+		t.Fatalf("input path must be last so ffprobe treats it as the input: %v", args)
+	}
+}
+
+func probeArgValue(args []string, flag string) (string, bool) {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}

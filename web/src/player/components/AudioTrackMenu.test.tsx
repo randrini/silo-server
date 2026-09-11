@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AudioTrackMenu } from "./AudioTrackMenu";
 
 function renderMenu(tracks: Parameters<typeof AudioTrackMenu>[0]["tracks"]) {
@@ -40,5 +40,71 @@ describe("AudioTrackMenu", () => {
   it("omits the language segment when no language resolves", () => {
     renderMenu([{ title: "Commentary", codec: "ac3", layout: "2.0" }]);
     expect(screen.getByText("2.0")).toBeTruthy();
+  });
+
+  it("keeps the trigger enabled with a single track and opens to that entry", () => {
+    render(
+      createElement(AudioTrackMenu, {
+        tracks: [{ title: "English", codec: "eac3", channels: 6, default: true }],
+        activeIndex: 0,
+        onSelect: () => {},
+        currentPosition: 0,
+      }),
+    );
+
+    const trigger = screen.getByRole("button", { name: "Audio tracks" });
+    expect(trigger).not.toHaveAttribute("aria-disabled");
+    expect(trigger).not.toHaveClass("cursor-default");
+    expect(trigger).not.toHaveClass("opacity-40");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    fireEvent.click(trigger);
+
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    const entry = screen.getByRole("menuitem");
+    expect(entry).toHaveClass("text-blue-400");
+    expect(entry).toHaveTextContent("English");
+    expect(entry).toHaveTextContent("EAC3");
+    expect(entry).toHaveTextContent("5.1");
+    expect(entry).toHaveTextContent("Default");
+    expect(entry).toHaveTextContent("\u2713");
+  });
+
+  it("renders nothing when there are no tracks", () => {
+    const { container } = render(
+      createElement(AudioTrackMenu, {
+        tracks: [],
+        activeIndex: -1,
+        onSelect: () => {},
+        currentPosition: 0,
+      }),
+    );
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByRole("button", { name: "Audio tracks" })).toBeNull();
+  });
+
+  it("keeps multiple-track selection behavior unchanged", () => {
+    const onSelect = vi.fn();
+    render(
+      createElement(AudioTrackMenu, {
+        tracks: [
+          { title: "English", codec: "eac3", channels: 6, default: true },
+          { title: "French", codec: "aac", channels: 2 },
+        ],
+        activeIndex: 0,
+        onSelect,
+        currentPosition: 0,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    const entries = screen.getAllByRole("menuitem");
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toHaveClass("text-blue-400");
+    expect(entries[1]).not.toHaveClass("text-blue-400");
+
+    fireEvent.click(entries[1]);
+    expect(onSelect).toHaveBeenCalledWith(1, 0);
   });
 });
