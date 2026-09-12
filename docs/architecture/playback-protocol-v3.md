@@ -242,6 +242,16 @@ the historical behavior — the server may substitute an alternate version when
 the requested one cannot be delivered. The field is optional and
 unconditionally available; existing clients that omit it are unchanged.
 
+**Forcing a fresh relink.** `force_relink` is an optional boolean (default
+`false`). When `true`, the server re-queries the provider for a fresh virtual-
+source listing instead of trusting the cached or pinned candidate, and drops
+the stale pin when the provider no longer lists the requested candidate.
+It is meaningful only alongside an explicit `file_selection`: clients set it
+when the user explicitly retries a version the catalog marked unavailable, or
+when the user retries a retryable terminal where the provider offered no usable
+stream. Absent means the server keeps its existing listing and cache behavior,
+so clients that omit it are unchanged.
+
 ### 2.3 `POST /playback/{session_id}/replan`
 
 Asks for a different plan for an existing session — after a failure, or because

@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -417,5 +418,72 @@ func TestRestartSeekTarget_CopyForwardJumpRequiresBoundedEnvelope(t *testing.T) 
 	// base 18 + (40-9)*2 = 80.
 	if math.Abs(got-80) > 0.0001 {
 		t.Fatalf("bounded target = %.6f, want 80", got)
+	}
+}
+
+// TestRestartSeekTarget_CopyForwardJumpScalesByManifestAverage pins the
+// forward-jump estimate against the manifest's real segment timing. hls_time is
+// only a lower bound: keyframe-aligned copy fragments run longer, so a long
+// jump computed from the nominal duration lands early and serves content ahead
+// of the timeline. With five produced fragments averaging 2.5s the estimate
+// must use that average; with a single fragment it falls back to nominal 2s.
+func TestRestartSeekTarget_CopyForwardJumpScalesByManifestAverage(t *testing.T) {
+	baseOpts := TranscodeOpts{
+		SeekSeconds:            18.261,
+		StreamOriginSeconds:    18,
+		CopySeekAnchorResolved: true,
+		TargetCodecVideo:       "copy",
+		SegmentDuration:        2,
+		StartSegmentNumber:     9,
+		TotalDuration:          1000,
+	}
+	writeManifest := func(t *testing.T, dir, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "stream.m3u8"), []byte(body), 0o644); err != nil {
+			t.Fatalf("write manifest: %v", err)
+		}
+	}
+	writeProducedSegments := func(t *testing.T, dir string, numbers ...int) {
+		t.Helper()
+		for _, number := range numbers {
+			name := filepath.Join(dir, segmentFilename(number, baseOpts))
+			if err := os.WriteFile(name, []byte("segment"), 0o644); err != nil {
+				t.Fatalf("write segment %d: %v", number, err)
+			}
+		}
+	}
+
+	fiveDir := t.TempDir()
+	fiveSegments := "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-MEDIA-SEQUENCE:9\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+	for i := 0; i < 5; i++ {
+		fiveSegments += fmt.Sprintf("#EXTINF:2.500000,\nseg_%05d.m4s\n", 9+i)
+	}
+	writeManifest(t, fiveDir, fiveSegments)
+	writeProducedSegments(t, fiveDir, 9, 10, 11, 12, 13)
+
+	averaged := &TranscodeSession{outputDir: fiveDir, opts: baseOpts}
+	got, ok, err := averaged.RestartSeekTarget(109)
+	if err != nil || !ok {
+		t.Fatalf("averaged RestartSeekTarget = (%v, %v, %v), want (268, true, nil)", got, ok, err)
+	}
+	// base 18 + (109-9)*2.5 = 268; the nominal 2s would give 218.
+	if math.Abs(got-268) > 0.0001 {
+		t.Fatalf("averaged forward jump = %.6f, want 268 (manifest average 2.5s)", got)
+	}
+
+	// A manifest entry with no produced file is not a real timing: with only one
+	// produced segment the estimate must fall back to the nominal duration.
+	singleDir := t.TempDir()
+	writeManifest(t, singleDir, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-MEDIA-SEQUENCE:9\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2.500000,\nseg_00009.m4s\n")
+	writeProducedSegments(t, singleDir, 9)
+
+	nominal := &TranscodeSession{outputDir: singleDir, opts: baseOpts}
+	got, ok, err = nominal.RestartSeekTarget(109)
+	if err != nil || !ok {
+		t.Fatalf("nominal RestartSeekTarget = (%v, %v, %v), want (218, true, nil)", got, ok, err)
+	}
+	// base 18 + (109-9)*2 = 218 when fewer than two produced timings exist.
+	if math.Abs(got-218) > 0.0001 {
+		t.Fatalf("nominal forward jump = %.6f, want 218 (nominal 2s)", got)
 	}
 }

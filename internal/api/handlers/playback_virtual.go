@@ -35,58 +35,87 @@ const (
 	virtualProbeBudget                = 15 * time.Second
 	maxVirtualPlaybackPrefetchFiles   = 2
 	virtualPlaybackPrefetchBudget     = 20 * time.Second
-	// virtualProbeFailureTTL damps probe retry storms. A candidate that just
-	// consumed the whole virtualProbeBudget without producing usable metadata
-	// is not probed again for this long; the resolver falls through to the
-	// candidate-declared metadata instead. This is a short-lived damper, not a
-	// cache: a marker never suppresses a probe that previously succeeded.
-	virtualProbeFailureTTL = 5 * time.Minute
+	// virtualProbeFailureTTL is the base damper window and
+	// virtualProbeFailureMaxTTL caps its exponential growth. A candidate that
+	// just consumed the whole virtualProbeBudget without producing usable
+	// metadata is not probed again for the current window; the resolver falls
+	// through to the candidate-declared metadata instead. Each repeated failure
+	// for the same key doubles the window (5m → 10m → 20m → 40m → 60m), so a
+	// permanently unprobeable source is retried at most about once per hour. A
+	// successful probe clears the marker entirely: this is a damper, not a
+	// cache.
+	virtualProbeFailureTTL    = 5 * time.Minute
+	virtualProbeFailureMaxTTL = 60 * time.Minute
 )
+
+// virtualProbeFailureMark records the most recent failure for one candidate
+// and the backoff window derived from the number of consecutive failures.
+type virtualProbeFailureMark struct {
+	ttl       time.Duration
+	expiresAt time.Time
+}
 
 // virtualProbeFailureCache remembers the last failed probe per candidate so a
 // replan does not pay the probe budget again. It is package-level because the
 // handler is shared across requests and the marker is advisory: a mutex keeps
 // concurrent starts safe, and the small map is bounded by the live candidate
-// set (entries older than the TTL are dropped on read).
+// set (entries that have been idle past the maximum backoff are dropped).
+// now is injectable for tests and defaults to time.Now.
 type virtualProbeFailureCache struct {
 	mu    sync.Mutex
-	marks map[string]time.Time
+	marks map[string]virtualProbeFailureMark
+	now   func() time.Time
 }
 
-func (c *virtualProbeFailureCache) recent(key string, now time.Time) bool {
+func (c *virtualProbeFailureCache) clock() time.Time {
+	if c != nil && c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (c *virtualProbeFailureCache) recent(key string) bool {
 	if c == nil || key == "" {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	at, ok := c.marks[key]
+	mark, ok := c.marks[key]
 	if !ok {
 		return false
 	}
-	if now.Sub(at) >= virtualProbeFailureTTL {
+	if !c.clock().Before(mark.expiresAt) {
 		delete(c.marks, key)
 		return false
 	}
 	return true
 }
 
-func (c *virtualProbeFailureCache) mark(key string, now time.Time) {
+func (c *virtualProbeFailureCache) mark(key string) {
 	if c == nil || key == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.marks == nil {
-		c.marks = make(map[string]time.Time)
+		c.marks = make(map[string]virtualProbeFailureMark)
 	}
-	// Prune expired markers so a long-lived process only retains failures from
-	// the last TTL window.
-	for k, at := range c.marks {
-		if now.Sub(at) >= virtualProbeFailureTTL {
+	now := c.clock()
+	// Prune markers that have been idle well past their window so a long-lived
+	// process only retains failures still in backoff.
+	for k, mark := range c.marks {
+		if now.After(mark.expiresAt.Add(virtualProbeFailureMaxTTL)) {
 			delete(c.marks, k)
 		}
 	}
-	c.marks[key] = now
+	ttl := virtualProbeFailureTTL
+	if prev, ok := c.marks[key]; ok {
+		ttl = prev.ttl * 2
+		if ttl > virtualProbeFailureMaxTTL {
+			ttl = virtualProbeFailureMaxTTL
+		}
+	}
+	c.marks[key] = virtualProbeFailureMark{ttl: ttl, expiresAt: now.Add(ttl)}
 }
 
 func (c *virtualProbeFailureCache) clear(key string) {
@@ -100,7 +129,7 @@ func (c *virtualProbeFailureCache) clear(key string) {
 
 // virtualProbeFailures is the process-wide probe failure damper. Tests may
 // clear entries directly.
-var virtualProbeFailures = &virtualProbeFailureCache{marks: make(map[string]time.Time)}
+var virtualProbeFailures = &virtualProbeFailureCache{marks: make(map[string]virtualProbeFailureMark)}
 
 // virtualProbeFailureKey identifies a probe target across replans. The resolved
 // stream URL carries rotating credentials, so the candidate's provider-neutral
@@ -650,7 +679,7 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 			h.maybeTriggerSubtitleSearch(attemptCtx, &transient, cand)
 			if h.VirtualPlaybackSourceProber != nil || h.VirtualPlaybackSourceProberWithHeaders != nil {
 				probeKey := virtualProbeFailureKey(cand.URI)
-				if virtualProbeFailures.recent(probeKey, time.Now()) {
+				if virtualProbeFailures.recent(probeKey) {
 					// A fresh failure already consumed the probe budget; fall
 					// back to the candidate-declared metadata instead of paying
 					// it again on this replan.
@@ -699,13 +728,13 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 					defer bgCancel()
 					probed, probeErr := h.probeVirtualSource(bgCtx, probeURL, &probeTransient, probeCand.RequestHeaders)
 					if probeErr != nil || probed == nil {
-						virtualProbeFailures.mark(probeKey, time.Now())
+						virtualProbeFailures.mark(probeKey)
 						slog.WarnContext(bgCtx, "background virtual stream probe failed", "component", "api", "candidate_uri", probeCand.URI, "error", probeErr)
 						h.unpinVirtualSticky(stickyKey, probeCand.URI)
 						return
 					}
 					if !virtualRuntimePlausible(probed.Duration, expectedRuntimeMinutes) {
-						virtualProbeFailures.mark(probeKey, time.Now())
+						virtualProbeFailures.mark(probeKey)
 						slog.WarnContext(bgCtx, "background virtual probe rejected: probed duration implausible",
 							"component", "api", "candidate_uri", probeCand.URI, "file_id", targetID,
 							"probed_duration_seconds", probed.Duration, "expected_runtime_minutes", expectedRuntimeMinutes)
@@ -749,7 +778,7 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 				URL: streamURL, URI: cand.URI, OwnerID: oid, File: &transient, ProbeSucceeded: false, Provenance: ProbeProvenanceFailed,
 			}, nil
 		}
-		if virtualProbeFailures.recent(probeKey, time.Now()) {
+		if virtualProbeFailures.recent(probeKey) {
 			// A recent probe failure already consumed the probe budget; use
 			// the candidate-declared metadata instead of paying it again.
 			return declaredFallback()
@@ -758,7 +787,7 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 		probed, probeErr := h.probeVirtualSource(probeCtx, streamURL, &transient, cand.RequestHeaders)
 		probeCancel()
 		if probeErr != nil || probed == nil {
-			virtualProbeFailures.mark(probeKey, time.Now())
+			virtualProbeFailures.mark(probeKey)
 			slog.DebugContext(r.Context(), "virtual stream probe timed out or failed; using candidate metadata", "component", "api", "candidate_uri", cand.URI, "error", probeErr)
 			return declaredFallback()
 		}

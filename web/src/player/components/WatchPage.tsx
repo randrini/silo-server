@@ -24,6 +24,9 @@ import { toast } from "sonner";
  */
 export const INVENTORY_REFRESH_INTERVAL_MS = 20_000;
 export const INVENTORY_REFRESH_MAX_ATTEMPTS = 5;
+// Wall-clock backstop: failed requests do not count toward the attempt cap, so
+// a persistent error loop also needs an absolute deadline to stop at.
+export const INVENTORY_REFRESH_DEADLINE_MS = 5 * 60_000;
 
 function patchChapterThumbnail(
   versions: PlayerFileVersion[],
@@ -236,18 +239,30 @@ export function WatchPage({
     if (!needsAudio && !needsSubtitles) return;
 
     const mediaFileId = session.mediaFileId;
+    const sessionId = session.sessionId;
     let cancelled = false;
-    let attempts = 0;
+    let completedAttempts = 0;
     let timer: number | null = null;
     let audioComplete = !needsAudio;
     let subtitlesComplete = !needsSubtitles;
+    // Absolute wall-clock deadline so an error loop that never completes a
+    // fetch cannot poll past the safety window.
+    const deadline = Date.now() + INVENTORY_REFRESH_DEADLINE_MS;
 
     const poll = async () => {
-      attempts += 1;
       try {
         const detail = await fetchWatchDetail(contentId, mediaFileId, libraryId);
         if (cancelled) return;
+        // Only completed responses count toward the cap; transient fetch
+        // errors are retried without burning the attempt budget.
+        completedAttempts += 1;
         const current = sessionRef.current;
+        // A version switch can land while the request is in flight. If the
+        // session no longer targets the file/session we polled for, discard
+        // the response silently; the restarted effect picks up the new target.
+        if (current.mediaFileId !== mediaFileId || current.sessionId !== sessionId) {
+          return;
+        }
         const version = detail.versions.find((candidate) => candidate.file_id === mediaFileId);
         if (version) {
           const nextAudioTracks = version.audio_tracks ?? [];
@@ -268,7 +283,8 @@ export function WatchPage({
         // Best effort; a later attempt may still succeed.
       }
       if (cancelled || (audioComplete && subtitlesComplete)) return;
-      if (attempts >= INVENTORY_REFRESH_MAX_ATTEMPTS) return;
+      if (completedAttempts >= INVENTORY_REFRESH_MAX_ATTEMPTS) return;
+      if (Date.now() >= deadline) return;
       timer = window.setTimeout(() => void poll(), INVENTORY_REFRESH_INTERVAL_MS);
     };
 

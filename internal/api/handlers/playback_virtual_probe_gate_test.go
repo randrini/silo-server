@@ -296,7 +296,12 @@ func TestResolveVirtualProbeSuccessClearsFailureMarker(t *testing.T) {
 		}, nil)
 
 	// Seed a stale failure so the clear path is exercised after the probe.
-	virtualProbeFailures.mark(key, time.Now().Add(-virtualProbeFailureTTL-time.Minute))
+	virtualProbeFailures.mu.Lock()
+	virtualProbeFailures.marks[key] = virtualProbeFailureMark{
+		ttl:       virtualProbeFailureTTL,
+		expiresAt: time.Now().Add(-time.Minute),
+	}
+	virtualProbeFailures.mu.Unlock()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
 	file := *stored
@@ -310,7 +315,7 @@ func TestResolveVirtualProbeSuccessClearsFailureMarker(t *testing.T) {
 	if probeCalls != 1 {
 		t.Fatalf("prober called %d times, want 1", probeCalls)
 	}
-	if virtualProbeFailures.recent(key, time.Now()) {
+	if virtualProbeFailures.recent(key) {
 		t.Fatal("failure marker survived a successful probe")
 	}
 }
@@ -320,13 +325,81 @@ func TestVirtualProbeFailureCacheClearsMarker(t *testing.T) {
 	virtualProbeFailures.clear(key)
 	t.Cleanup(func() { virtualProbeFailures.clear(key) })
 
-	now := time.Now()
-	virtualProbeFailures.mark(key, now)
-	if !virtualProbeFailures.recent(key, now) {
+	virtualProbeFailures.mark(key)
+	if !virtualProbeFailures.recent(key) {
 		t.Fatal("fresh failure marker is not recent")
 	}
 	virtualProbeFailures.clear(key)
-	if virtualProbeFailures.recent(key, now) {
+	if virtualProbeFailures.recent(key) {
 		t.Fatal("cleared failure marker is still recent")
+	}
+}
+
+// The damper backs off exponentially: each consecutive failure for the same
+// key doubles the window, capped at virtualProbeFailureMaxTTL. The stored
+// expiry must be derived from the injected clock, not the wall clock.
+func TestVirtualProbeFailureCacheBackoffGrowsAndCaps(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cache := &virtualProbeFailureCache{
+		marks: make(map[string]virtualProbeFailureMark),
+		now:   func() time.Time { return now },
+	}
+	key := "virtual://movie/tt-backoff"
+
+	cache.mark(key)
+	first := cache.marks[key]
+	if first.ttl != virtualProbeFailureTTL {
+		t.Fatalf("first failure ttl=%s, want %s", first.ttl, virtualProbeFailureTTL)
+	}
+	if want := now.Add(virtualProbeFailureTTL); !first.expiresAt.Equal(want) {
+		t.Fatalf("first failure expiresAt=%s, want %s", first.expiresAt, want)
+	}
+
+	// A second failure, after the first window lapses but while the marker is
+	// still retained, extends the stored expiry to 10 minutes.
+	now = now.Add(virtualProbeFailureTTL + time.Minute)
+	cache.mark(key)
+	second := cache.marks[key]
+	if second.ttl != 2*virtualProbeFailureTTL {
+		t.Fatalf("second failure ttl=%s, want %s", second.ttl, 2*virtualProbeFailureTTL)
+	}
+	if !second.expiresAt.After(first.expiresAt) {
+		t.Fatalf("second failure expiresAt=%s did not grow past first %s", second.expiresAt, first.expiresAt)
+	}
+
+	// Keep failing: the window doubles until it hits the cap and stays there.
+	for i := 0; i < 6; i++ {
+		now = now.Add(cache.marks[key].ttl)
+		cache.mark(key)
+	}
+	if got := cache.marks[key].ttl; got != virtualProbeFailureMaxTTL {
+		t.Fatalf("capped ttl=%s, want %s", got, virtualProbeFailureMaxTTL)
+	}
+}
+
+// recent honors the per-key backoff window: it is true inside the window and
+// false once the stored expiry passes, dropping the marker on read.
+func TestVirtualProbeFailureCacheRecentHonorsBackoff(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cache := &virtualProbeFailureCache{
+		marks: make(map[string]virtualProbeFailureMark),
+		now:   func() time.Time { return now },
+	}
+	key := "virtual://movie/tt-backoff-recent"
+
+	cache.mark(key)
+	if !cache.recent(key) {
+		t.Fatal("fresh marker is not recent")
+	}
+	now = now.Add(virtualProbeFailureTTL - time.Second)
+	if !cache.recent(key) {
+		t.Fatal("marker inside its window is not recent")
+	}
+	now = now.Add(2 * time.Second)
+	if cache.recent(key) {
+		t.Fatal("marker past its window is still recent")
+	}
+	if _, ok := cache.marks[key]; ok {
+		t.Fatal("expired marker was not pruned on read")
 	}
 }

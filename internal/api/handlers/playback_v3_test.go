@@ -5025,6 +5025,22 @@ func TestSeekReanchorWithinActiveWindowV3(t *testing.T) {
 	if !seekReanchorWithinActiveWindowV3(unbounded, 0) {
 		t.Fatal("an unbounded window must reuse the active transport")
 	}
+	// A can_seek_anywhere plan publishes no window start, but the reused
+	// generation still begins at a known stream origin. A target before that
+	// origin cannot be served in place: the segment layer declines with
+	// ErrSegmentNotFound and the client pays a 404 -> rebuild, so the reanchor
+	// must rebuild directly. An unknown (zero) origin keeps the permissive path.
+	originBound := hlsBase
+	originBound.Timeline = playback.TimelineV3{StreamOriginSeconds: 600, CanSeekAnywhere: true}
+	if seekReanchorWithinActiveWindowV3(originBound, 599.99) {
+		t.Fatal("target before a known stream origin must not reuse the active transport")
+	}
+	if !seekReanchorWithinActiveWindowV3(originBound, 600) {
+		t.Fatal("target at the known stream origin must reuse the active transport")
+	}
+	if !seekReanchorWithinActiveWindowV3(originBound, 10_000) {
+		t.Fatal("forward jump past a known stream origin must reuse the active transport")
+	}
 
 	// A progressive remux is a single continuous byte stream, not a
 	// segment-addressable manifest: no target can be served in place, no matter

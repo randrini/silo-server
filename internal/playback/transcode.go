@@ -3672,28 +3672,64 @@ func (s *TranscodeSession) RestartSeekTarget(segNum int) (float64, bool, error) 
 // copy-mode segment beyond the produced manifest window. The current
 // generation begins at StreamOriginSeconds (or SeekSeconds when no keyframe
 // origin was resolved) with StartSegmentNumber as its first URI, so the delta
-// to the requested segment is the nominal segment duration. The estimate is
-// only valid when the media duration is known and it lands inside that
-// envelope, so a target before the session start or past the end never
+// to the requested segment is the segment duration. The nominal hls_time is
+// only a lower bound: keyframe-aligned copy fragments run longer, and the
+// undershoot grows with the jump distance. When the manifest has at least two
+// real timings their average is used instead of the nominal duration. The
+// estimate is only valid when the media duration is known and it lands inside
+// that envelope, so a target before the session start or past the end never
 // fabricates a position.
 func (s *TranscodeSession) copyForwardJumpSeekTarget(segNum int) (float64, bool) {
 	opts := s.Opts()
 	if opts.TotalDuration <= 0 || segNum < opts.StartSegmentNumber {
 		return 0, false
 	}
-	segDuration := opts.SegmentDuration
+	segDuration := float64(opts.SegmentDuration)
 	if segDuration <= 0 {
-		segDuration = defaultSegmentDuration
+		segDuration = float64(defaultSegmentDuration)
+	}
+	if avg, ok := s.averageManifestSegmentDuration(); ok {
+		segDuration = avg
 	}
 	base := opts.SeekSeconds
 	if opts.CopySeekAnchorResolved {
 		base = opts.StreamOriginSeconds
 	}
-	seekSeconds := base + float64(segNum-opts.StartSegmentNumber)*float64(segDuration)
+	seekSeconds := base + float64(segNum-opts.StartSegmentNumber)*segDuration
 	if seekSeconds <= 0 || seekSeconds > opts.TotalDuration {
 		return 0, false
 	}
 	return seekSeconds, true
+}
+
+// averageManifestSegmentDuration returns the mean duration of the segments the
+// manifest currently lists AND whose files exist on disk. It reports false when
+// fewer than two produced entries are available, so callers fall back to the
+// nominal segment duration. Copy-mode fragments are keyframe-aligned, so this
+// real average is the better estimator for a jump past the produced head.
+func (s *TranscodeSession) averageManifestSegmentDuration() (float64, bool) {
+	_, timeline, err := s.manifestTimelineSnapshot()
+	if err != nil || len(timeline.entries) < 2 {
+		return 0, false
+	}
+	opts := s.Opts()
+	var total float64
+	produced := 0
+	for _, entry := range timeline.entries {
+		if entry.duration <= 0 {
+			continue
+		}
+		info, statErr := os.Stat(filepath.Join(s.outputDir, segmentFilename(entry.number, opts)))
+		if statErr != nil || info.Size() <= 0 {
+			continue
+		}
+		total += entry.duration
+		produced++
+	}
+	if produced < 2 {
+		return 0, false
+	}
+	return total / float64(produced), true
 }
 
 // ReportSegmentDownloaded records that the client has downloaded the given

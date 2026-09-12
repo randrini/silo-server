@@ -6103,11 +6103,21 @@ func reuseEligibleDeliveryV3(delivery playback.DeliveryV3) bool {
 // one cannot produce bytes before its origin); a target past the produced head
 // is deliberately allowed through. A closed window end is honored so reuse
 // never claims a range the transport no longer serves.
+//
+// A can_seek_anywhere plan publishes no window start, but the reused generation
+// still begins at a known stream origin: the segment layer can only serve
+// bytes at or after that origin, and a target before it makes
+// copyForwardJumpSeekTarget decline with ErrSegmentNotFound, turning the seek
+// into a 404 -> failure-recovery rebuild. Reject it here so the caller rebuilds
+// directly. An unknown origin (zero) keeps the previous permissive behavior.
 func seekReanchorWithinActiveWindowV3(plan playback.PlanV3, position float64) bool {
 	if !isHLSDeliveryV3(plan.Delivery) {
 		return false
 	}
 	if plan.Timeline.SeekWindowStartSeconds != nil && position < *plan.Timeline.SeekWindowStartSeconds {
+		return false
+	}
+	if plan.Timeline.StreamOriginSeconds > 0 && position < plan.Timeline.StreamOriginSeconds {
 		return false
 	}
 	if plan.Timeline.SeekWindowEndSeconds != nil && position > *plan.Timeline.SeekWindowEndSeconds {

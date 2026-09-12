@@ -6,7 +6,11 @@ import { fixturePlanV3 } from "../protocol-v3.fixtures";
 import { derivePersistedSubtitleMode } from "../utils/subtitleMode";
 import type { UsePlaybackSessionResult } from "../hooks/usePlaybackSession";
 import type { PlayerAudioTrack, PlayerFileVersion, WatchPageProps } from "../types";
-import { WatchPage } from "./WatchPage";
+import {
+  INVENTORY_REFRESH_DEADLINE_MS,
+  INVENTORY_REFRESH_INTERVAL_MS,
+  WatchPage,
+} from "./WatchPage";
 
 const playbackSessionMock = vi.hoisted(() => vi.fn());
 const videoPlayerMock = vi.hoisted(() => vi.fn());
@@ -527,5 +531,105 @@ describe("WatchPage live inventory refresh", () => {
 
     // One attempt per interval, capped at five.
     expect(fetchWatchDetailMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("retries transient fetch errors without spending the attempt budget", async () => {
+    const applyAudioInventory = vi.fn();
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [planSubtitle],
+        applyAudioInventory,
+      }),
+    );
+    fetchWatchDetailMock
+      .mockRejectedValueOnce(new Error("network"))
+      .mockRejectedValueOnce(new Error("network"))
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValue({
+        versions: [{ ...virtualVersion, audio_tracks: richerAudioTracks }],
+      });
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualVersion] }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INVENTORY_REFRESH_INTERVAL_MS * 4);
+    });
+
+    // The three failed fetches do not count against the cap, so the fourth
+    // (successful) request still runs and fills the inventory in.
+    expect(fetchWatchDetailMock).toHaveBeenCalledTimes(4);
+    expect(applyAudioInventory).toHaveBeenCalledWith(richerAudioTracks);
+  });
+
+  it("stops polling at the elapsed deadline when every request fails", async () => {
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [],
+      }),
+    );
+    // Every request fails, so the completed-attempt cap never trips.
+    fetchWatchDetailMock.mockRejectedValue(new Error("network"));
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualVersion] }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INVENTORY_REFRESH_DEADLINE_MS * 2);
+    });
+
+    // One request per interval until the five-minute deadline, then none.
+    expect(fetchWatchDetailMock).toHaveBeenCalledTimes(
+      INVENTORY_REFRESH_DEADLINE_MS / INVENTORY_REFRESH_INTERVAL_MS,
+    );
+  });
+
+  it("discards a slow response that lands after the session switched files", async () => {
+    const applyAudioInventory = vi.fn();
+    let resolveFetch: (value: { versions: PlayerFileVersion[] }) => void = () => {};
+    fetchWatchDetailMock.mockImplementation(
+      () =>
+        new Promise<{ versions: PlayerFileVersion[] }>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 7,
+        sessionId: "session-1",
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [planSubtitle],
+        applyAudioInventory,
+      }),
+    );
+
+    const { rerender } = render(
+      createElement(WatchPage, { ...watchPageProps, versions: [virtualVersion] }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INVENTORY_REFRESH_INTERVAL_MS);
+    });
+    expect(fetchWatchDetailMock).toHaveBeenCalledTimes(1);
+
+    // The session switches to file 8 while file 7's request is in flight.
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 8,
+        sessionId: "session-2",
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [planSubtitle],
+        applyAudioInventory,
+      }),
+    );
+    rerender(createElement(WatchPage, { ...watchPageProps, versions: [virtualVersion] }));
+
+    // File 7's response resolves after the switch.
+    await act(async () => {
+      resolveFetch({ versions: [{ ...virtualVersion, audio_tracks: richerAudioTracks }] });
+      await Promise.resolve();
+    });
+
+    expect(applyAudioInventory).not.toHaveBeenCalled();
   });
 });
