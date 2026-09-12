@@ -919,3 +919,67 @@ func TestReplaceVirtualCandidatesRetainsDelivered(t *testing.T) {
 		t.Fatalf("relisted known-good row not updated: path=%q failed=%v delivered=%v", relistedPathNow, relistedFailed, relistedEvidence)
 	}
 }
+
+// The playback optimistic-start gate reads delivery evidence from the
+// MediaFile model, so the standard row scan must surface last_delivered_at.
+func TestGetByIDExposesLastDeliveredAt(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	deliveredAt := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+	deliveredPath := fmt.Sprintf("virtual://movie/tt-scan-delivered-%d?result=delivered", suffix)
+	neverDeliveredPath := fmt.Sprintf("virtual://movie/tt-scan-delivered-%d?result=never", suffix)
+
+	var folderID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_folders(type,name,enabled)
+		VALUES('movies',$1,true) RETURNING id`, fmt.Sprintf("Scan Delivered %d", suffix)).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE file_path = ANY($1)`, []string{deliveredPath, neverDeliveredPath})
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id=$1`, folderID)
+	})
+
+	seed := func(path string, delivered *time.Time) int {
+		var id int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files(media_folder_id,file_path,file_size,container,last_delivered_at)
+			VALUES($1,$2,0,'virtual',$3) RETURNING id`,
+			folderID, path, delivered).Scan(&id); err != nil {
+			t.Fatalf("seed media file %q: %v", path, err)
+		}
+		return id
+	}
+	deliveredID := seed(deliveredPath, &deliveredAt)
+	neverID := seed(neverDeliveredPath, nil)
+
+	repo := NewFileRepository(pool)
+	delivered, err := repo.GetByID(ctx, deliveredID)
+	if err != nil {
+		t.Fatalf("GetByID delivered: %v", err)
+	}
+	if delivered.LastDeliveredAt == nil {
+		t.Fatal("GetByID did not expose last_delivered_at for a delivered row")
+	}
+	if got := delivered.LastDeliveredAt.UTC(); !got.Equal(deliveredAt.UTC()) {
+		t.Fatalf("last_delivered_at = %s, want %s", got, deliveredAt.UTC())
+	}
+
+	never, err := repo.GetByID(ctx, neverID)
+	if err != nil {
+		t.Fatalf("GetByID never-delivered: %v", err)
+	}
+	if never.LastDeliveredAt != nil {
+		t.Fatalf("last_delivered_at = %v, want nil for a never-delivered row", never.LastDeliveredAt)
+	}
+}

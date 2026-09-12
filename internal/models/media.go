@@ -146,7 +146,11 @@ type MediaFile struct {
 	// stream-open (corrupted NZB, dead provider URL). A fresh listing clears
 	// it; the auto-pick skips failed candidates while the dropdown still
 	// shows them for a manual retry.
-	FailedAt           *time.Time
+	FailedAt *time.Time
+	// LastDeliveredAt is the last time this virtual candidate delivered media
+	// bytes to a client. It is the durable known-good evidence the delivery
+	// grace and the optimistic start path read; nil means never delivered.
+	LastDeliveredAt    *time.Time
 	FirstSeenScanRunID string
 	CreatedAt          time.Time
 	UpdatedAt          time.Time

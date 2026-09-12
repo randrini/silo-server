@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -556,5 +558,194 @@ func TestVirtualProbeFailureCacheRecentHonorsBackoff(t *testing.T) {
 	}
 	if _, ok := cache.marks[key]; ok {
 		t.Fatal("expired marker was not pruned on read")
+	}
+}
+
+// virtualOptimisticFile is a virtual row that has never been probed (no probe
+// stamp, no stored tracks) but may carry recent delivery evidence: the state
+// the optimistic-start gate recognizes.
+func virtualOptimisticFile(path string, deliveredAt *time.Time) *models.MediaFile {
+	return &models.MediaFile{
+		ID:                         901,
+		ContentID:                  "movie-optimistic",
+		FilePath:                   path,
+		Container:                  "virtual",
+		LastDeliveredAt:            deliveredAt,
+		VirtualOwnerInstallationID: 5,
+	}
+}
+
+// virtualOptimisticGateHandler wires a non-blocking resolver spy and a
+// permissive prober so the synchronous-resolve fallback is observable by call
+// count.
+func virtualOptimisticGateHandler(detailedCalls *int32) *PlaybackHandler {
+	return &PlaybackHandler{
+		VirtualMediaDetailedResolver: VirtualMediaDetailedResolverFunc(
+			func(_ context.Context, virtualURI string, _ int, _ int, _ string, _ bool, _ []string, _ string) (ResolvedVirtualMedia, error) {
+				atomic.AddInt32(detailedCalls, 1)
+				return ResolvedVirtualMedia{URL: "http://provider.example/stream.mkv", URI: virtualURI}, nil
+			}),
+		VirtualPlaybackResolver: VirtualPlaybackResolverFunc(
+			func(_ context.Context, path string, _ int, _ string, _ int) (string, error) {
+				return "http://provider.example/legacy?path=" + path, nil
+			}),
+		VirtualPlaybackSourceProber: func(_ context.Context, _ string, f *models.MediaFile) (*models.MediaFile, error) {
+			f.VideoTracks = []models.VideoTrack{{Codec: "h264", Width: 1920, Height: 1080}}
+			f.AudioTracks = []models.AudioTrack{{Codec: "aac", Channels: 2, Language: "eng"}}
+			f.CodecVideo, f.CodecAudio, f.Resolution, f.Container = "h264", "aac", "1080p", "mkv"
+			return f, nil
+		},
+	}
+}
+
+// A row that delivered bytes recently starts optimistically even when the
+// probe stamp is missing: the start path returns the persisted URI without
+// waiting on the provider, and the background chain resolves and probes so the
+// next start takes the P0 fast path. The resolver is held open, so the start
+// can only return if it never called it synchronously.
+func TestResolveVirtualOptimisticStartWithinDeliveryGrace(t *testing.T) {
+	uri := "virtual://movie/tt-optimistic?result=cand-1"
+	deliveredAt := time.Now().Add(-time.Hour)
+	stored := virtualOptimisticFile(uri, &deliveredAt)
+
+	saverDone := make(chan string, 1)
+	resolverStarted := make(chan struct{}, 1)
+	releaseResolver := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseResolver) }) }
+	t.Cleanup(release)
+
+	var detailedCalls int32
+	h := &PlaybackHandler{
+		VirtualMediaDetailedResolver: VirtualMediaDetailedResolverFunc(
+			func(_ context.Context, virtualURI string, _ int, _ int, _ string, _ bool, _ []string, _ string) (ResolvedVirtualMedia, error) {
+				atomic.AddInt32(&detailedCalls, 1)
+				resolverStarted <- struct{}{}
+				<-releaseResolver
+				return ResolvedVirtualMedia{URL: "http://provider.example/stream.mkv", URI: virtualURI}, nil
+			}),
+		// resolveVirtualPlaybackSource requires the legacy resolver to be
+		// configured even when the detailed resolver takes precedence.
+		VirtualPlaybackResolver: VirtualPlaybackResolverFunc(
+			func(_ context.Context, path string, _ int, _ string, _ int) (string, error) {
+				return "http://provider.example/legacy?path=" + path, nil
+			}),
+		VirtualFileLookup: func(_ context.Context, _ string) (*models.MediaFile, error) {
+			return stored, nil
+		},
+		VirtualPlaybackSourceProber: func(_ context.Context, _ string, f *models.MediaFile) (*models.MediaFile, error) {
+			f.VideoTracks = []models.VideoTrack{{Codec: "h264", Width: 1920, Height: 1080}}
+			f.AudioTracks = []models.AudioTrack{{Codec: "aac", Channels: 2, Language: "eng"}}
+			f.CodecVideo, f.CodecAudio, f.Resolution, f.Container = "h264", "aac", "1080p", "mkv"
+			return f, nil
+		},
+		VirtualFileMetadataSaver: func(_ context.Context, _ int, expectedFilePath string, _, _, _ []byte, _, _, _, _ string, _ bool, _ int, _ int) error {
+			saverDone <- expectedFilePath
+			return nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	file := *stored
+	type startResult struct {
+		src resolvedVirtualPlaybackSource
+		err error
+	}
+	started := make(chan startResult, 1)
+	go func() {
+		src, err := h.resolveVirtualPlaybackSource(req, &file, "profile-1", true, nil, "", "", 0, false)
+		started <- startResult{src, err}
+	}()
+
+	var resolved resolvedVirtualPlaybackSource
+	select {
+	case r := <-started:
+		if r.err != nil {
+			t.Fatalf("resolveVirtualPlaybackSource error: %v", r.err)
+		}
+		resolved = r.src
+	case <-time.After(2 * time.Second):
+		t.Fatal("start path blocked on the synchronous resolver despite recent delivery")
+	}
+
+	if resolved.URL != "" {
+		t.Fatalf("resolved URL = %q, want empty optimistic start", resolved.URL)
+	}
+	if resolved.URI != uri {
+		t.Fatalf("resolved URI = %q, want persisted %q", resolved.URI, uri)
+	}
+	if resolved.Provenance != ProbeProvenancePending || resolved.ProbeSucceeded {
+		t.Fatalf("provenance=%q succeeded=%v, want pending/false", resolved.Provenance, resolved.ProbeSucceeded)
+	}
+	if resolved.File == nil || resolved.File.FilePath != uri {
+		t.Fatalf("resolved file = %#v, want persisted candidate %q", resolved.File, uri)
+	}
+
+	// The optimistic return must still kick the background resolve+probe chain.
+	select {
+	case <-resolverStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("optimistic start did not kick the background resolver")
+	}
+	release()
+	select {
+	case got := <-saverDone:
+		if got != uri {
+			t.Fatalf("background persist path = %q, want %q", got, uri)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background revalidation did not persist probed metadata")
+	}
+}
+
+// No adopted result= and no sticky pin means no persisted candidate: the
+// optimistic gate must not apply even inside the delivery grace, so the start
+// still resolves synchronously.
+func TestResolveVirtualOptimisticRequiresPinnedCandidate(t *testing.T) {
+	deliveredAt := time.Now().Add(-time.Hour)
+	file := virtualOptimisticFile("virtual://movie/tt-no-pin", &deliveredAt)
+	var detailedCalls int32
+	h := virtualOptimisticGateHandler(&detailedCalls)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	if _, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", true, nil, "", "", 0, false); err != nil {
+		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+	}
+	if got := atomic.LoadInt32(&detailedCalls); got != 1 {
+		t.Fatalf("detailed resolver called %d times, want 1 without a pinned/adopted candidate", got)
+	}
+}
+
+// Delivery older than the grace window is not evidence the candidate is still
+// good, so the start must resolve synchronously instead of starting blind.
+func TestResolveVirtualOptimisticRequiresDeliveryGrace(t *testing.T) {
+	stale := time.Now().Add(-8 * 24 * time.Hour)
+	file := virtualOptimisticFile("virtual://movie/tt-stale-delivery?result=cand-1", &stale)
+	var detailedCalls int32
+	h := virtualOptimisticGateHandler(&detailedCalls)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	if _, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", true, nil, "", "", 0, false); err != nil {
+		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+	}
+	if got := atomic.LoadInt32(&detailedCalls); got != 1 {
+		t.Fatalf("detailed resolver called %d times, want 1 once delivery grace lapsed", got)
+	}
+}
+
+// The optimistic gate is start-only. A synchronous replan/alternate caller
+// (deferProbe=false) still resolves even with recent delivery evidence.
+func TestResolveVirtualOptimisticOnlyOnDeferredStart(t *testing.T) {
+	deliveredAt := time.Now().Add(-time.Hour)
+	file := virtualOptimisticFile("virtual://movie/tt-sync-start?result=cand-1", &deliveredAt)
+	var detailedCalls int32
+	h := virtualOptimisticGateHandler(&detailedCalls)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	if _, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", false, nil, "", "", 0, false); err != nil {
+		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+	}
+	if got := atomic.LoadInt32(&detailedCalls); got != 1 {
+		t.Fatalf("detailed resolver called %d times, want 1 for a synchronous caller", got)
 	}
 }
