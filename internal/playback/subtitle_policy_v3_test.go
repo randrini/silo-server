@@ -102,6 +102,129 @@ func TestPlanPlaybackV3TranscodeUsesHLSDeliverySubtitleCapabilities(t *testing.T
 	}
 }
 
+// A carried ordinal from a richer version (the prod case: a 35-38 track
+// version resumed onto a 3-track edition) must not hard-fail the start. There
+// is no carried-vs-explicit wire flag, so the policy degrades the selection to
+// subtitles-off instead of terminalling the whole plan.
+func TestResolveSubtitlePolicyV3OutOfRangeDegradesToOff(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.ExternalSubtitles = nil
+	file.SubtitleTracks = []models.SubtitleTrack{{Codec: "subrip"}, {Codec: "subrip"}, {Codec: "subrip"}}
+	req := validStartRequestV3()
+	index := 20
+	req.SubtitleTrackIndex = &index
+	req.SubtitleTrackID = TrackIDV3(file.ID, "subtitle", index)
+
+	result := ResolveSubtitlePolicyV3(file, req, true, DeliveryClassOriginalHTTPV3, nil)
+
+	if result.Terminal != nil {
+		t.Fatalf("out-of-range carried selection must not terminal the start: %#v", result.Terminal)
+	}
+	if result.Decision.Mode != SubtitleOffV3 || result.SelectedIndex != -1 || result.TransportIndex != -1 {
+		t.Fatalf("out-of-range selection = %#v, want subtitles off", result)
+	}
+}
+
+func TestResolveSubtitlePolicyV3InRangeSelectionStillResolves(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.ExternalSubtitles = nil
+	file.SubtitleTracks = []models.SubtitleTrack{{Codec: "subrip"}}
+	req := validStartRequestV3()
+	index := 0
+	req.SubtitleTrackIndex = &index
+
+	result := ResolveSubtitlePolicyV3(file, req, true, DeliveryClassOriginalHTTPV3, nil)
+
+	if result.Terminal != nil || result.Decision.Mode != SubtitleRenderV3 || result.SelectedIndex != 0 {
+		t.Fatalf("in-range selection = %#v, want a render of track 0", result)
+	}
+}
+
+// A subtitle identity still bound to a different (previous) file names no
+// track on the effective file; it must degrade to off, not terminal.
+func TestResolveSubtitlePolicyV3ForeignIdentityDegradesToOff(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.SubtitleTracks = []models.SubtitleTrack{{Codec: "subrip"}}
+	req := validStartRequestV3()
+	req.SubtitleTrackID = TrackIDV3(999, "subtitle", 0)
+
+	result := ResolveSubtitlePolicyV3(file, req, true, DeliveryClassOriginalHTTPV3, nil)
+
+	if result.Terminal != nil || result.Decision.Mode != SubtitleOffV3 || result.SelectedIndex != -1 {
+		t.Fatalf("stale carried identity = %#v, want subtitles off", result)
+	}
+}
+
+func TestPlanPlaybackV3OutOfRangeSubtitleDegradesToOff(t *testing.T) {
+	file := detailedFixtureFileV3()
+	file.VideoTracks[0].VideoRange = "SDR"
+	file.VideoTracks[0].VideoRangeType = "SDR"
+	file.VideoTracks[0].ColorTransfer = "bt709"
+	file.SubtitleTracks = []models.SubtitleTrack{{Codec: "subrip"}, {Codec: "subrip"}, {Codec: "subrip"}}
+	req := validStartRequestV3()
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{
+		Codec: "hevc", Profiles: []string{"main 10"}, Levels: []int{153},
+		BitDepths: []int{10}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60,
+		MaxBitrateKbps: 80_000, Hardware: true,
+	}}
+	index := 20
+	req.SubtitleTrackIndex = &index
+	req.SubtitleTrackID = TrackIDV3(file.ID, "subtitle", index)
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: file, EffectiveFile: file, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: false}, Registry: testTransformationRegistryV3(),
+	})
+
+	if result.Terminal != nil {
+		t.Fatalf("out-of-range carried selection terminalled the plan: %s", ExplainPlannerResultV3(result))
+	}
+	if result.Plan == nil || result.Plan.Subtitle.Mode != SubtitleOffV3 || result.Plan.SelectedTracks.Subtitle != nil {
+		t.Fatalf("plan = %#v, want subtitles off and no selected subtitle", result.Plan)
+	}
+}
+
+// The plan's audio and subtitle inventories must be the effective file's, not
+// the requested edition's, so a version substitution cannot advertise tracks
+// the playing source does not have.
+func TestPlanPlaybackV3InventoriesFollowEffectiveFile(t *testing.T) {
+	requested := detailedFixtureFileV3()
+	requested.AudioTracks = []models.AudioTrack{{Codec: "eac3", Language: "eng", Channels: 6}}
+	requested.SubtitleTracks = []models.SubtitleTrack{{Language: "eng", Codec: "subrip"}}
+
+	effective := detailedFixtureFileV3()
+	effective.ID = 99
+	effective.AudioTracks = []models.AudioTrack{{Codec: "aac", Language: "jpn", Channels: 2, Default: true}}
+	effective.SubtitleTracks = []models.SubtitleTrack{{Language: "jpn", Codec: "ass"}}
+	for i := range effective.VideoTracks {
+		effective.VideoTracks[i].VideoRange = "SDR"
+		effective.VideoTracks[i].VideoRangeType = "SDR"
+		effective.VideoTracks[i].ColorTransfer = "bt709"
+	}
+	req := validStartRequestV3()
+	req.Capabilities.VideoDecode = []VideoDecodeCapabilityV3{{
+		Codec: "hevc", Profiles: []string{"main 10"}, Levels: []int{153},
+		BitDepths: []int{10}, MaxWidth: 3840, MaxHeight: 2160, MaxFrameRate: 60,
+		MaxBitrateKbps: 80_000, Hardware: true,
+	}}
+
+	result := PlanPlaybackV3(PlannerInputV3{
+		Request: req, RequestedFile: requested, EffectiveFile: effective, AudioTrackIndex: 0,
+		Settings: PlannerSettingsV3{TranscodeEnabled: false}, Registry: testTransformationRegistryV3(),
+	})
+	if result.Plan == nil {
+		t.Fatalf("plan failed: %s", ExplainPlannerResultV3(result))
+	}
+	if len(result.Plan.AudioTracks) != 1 || result.Plan.AudioTracks[0].Codec != "aac" || result.Plan.AudioTracks[0].Language != "jpn" {
+		t.Fatalf("audio tracks leaked the requested file: %#v", result.Plan.AudioTracks)
+	}
+	if len(result.Plan.Subtitle.Inventory) != 1 || result.Plan.Subtitle.Inventory[0].Codec != "ass" ||
+		result.Plan.Subtitle.Inventory[0].Language != "jpn" ||
+		result.Plan.Subtitle.Inventory[0].TrackID != TrackIDV3(effective.ID, "subtitle", 0) {
+		t.Fatalf("subtitle inventory leaked the requested file: %#v", result.Plan.Subtitle.Inventory)
+	}
+}
+
 func TestClientRenderableBitmapSubtitleV3UsesExactCodecFamilies(t *testing.T) {
 	for _, codec := range []string{"pgs", "pgssub", "hdmv_pgs_subtitle", "dvd_subtitle", "dvdsub", "dvb_subtitle", "dvbsub", "vobsub"} {
 		if !isClientRenderableBitmapSubtitleV3(codec) {

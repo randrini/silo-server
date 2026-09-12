@@ -2,6 +2,7 @@ package playback
 
 import (
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,8 +49,18 @@ func ResolveSubtitlePolicyV3(file *models.MediaFile, request StartRequestV3, tra
 		index = *request.SubtitleTrackIndex
 	} else if request.SubtitleTrackID != "" {
 		fileID, kind, ordinal, ok := ParseTrackIDV3(request.SubtitleTrackID)
-		if !ok || kind != "subtitle" || file == nil || fileID != file.ID {
+		if !ok || kind != "subtitle" {
 			return subtitleTerminalV3("subtitle_track_invalid", "The selected subtitle identity is invalid.")
+		}
+		if file != nil && fileID != file.ID {
+			// A carried identity still bound to the version that produced it
+			// names no track on the effective file. Degrade like any other
+			// stale selection rather than terminalling the start.
+			if deliveryClass == DeliveryClassOriginalHTTPV3 {
+				slog.Info("carried subtitle identity belongs to a different file; subtitles disabled",
+					"component", "playback", "file_id", file.ID, "carried_file_id", fileID)
+			}
+			return SubtitlePolicyResultV3{Decision: SubtitleDecisionV3{Mode: SubtitleOffV3}, SelectedIndex: -1, TransportIndex: -1}
 		}
 		index = ordinal
 	}
@@ -61,7 +72,22 @@ func ResolveSubtitlePolicyV3(file *models.MediaFile, request StartRequestV3, tra
 	}
 	entry, ok := subtitleEntryAtCombinedIndexV3(file, index, additional)
 	if !ok {
-		return subtitleTerminalV3("subtitle_track_unavailable", "The selected subtitle track is unavailable.")
+		// An ordinal that no longer addresses a track on the effective file is
+		// stale — a carried selection from a richer version, or a track the
+		// effective edition simply does not have. There is no wire flag today
+		// separating a carried/auto-restored pick from an explicit in-request
+		// one (the client sends both as subtitle_track_index), so both degrade
+		// to subtitles-off rather than hard-failing the whole start. Playability
+		// wins: the session still opens and the viewer can re-pick from the
+		// menu, whereas a start terminal leaves them unable to play at all. The
+		// handler's identity remap tries language/format matching first; this
+		// covers the case it cannot. Log only for the original delivery class so
+		// the three per-plan policy resolutions emit one line, not three.
+		if deliveryClass == DeliveryClassOriginalHTTPV3 {
+			slog.Info("subtitle selection out of range for effective file; subtitles disabled",
+				"component", "playback", "file_id", file.ID, "subtitle_track_index", index)
+		}
+		return SubtitlePolicyResultV3{Decision: SubtitleDecisionV3{Mode: SubtitleOffV3}, SelectedIndex: -1, TransportIndex: -1}
 	}
 	codec, source := entry.Codec, entry.Source
 	trackID := TrackIDV3(file.ID, "subtitle", index)

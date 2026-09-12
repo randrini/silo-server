@@ -4139,6 +4139,66 @@ func TestRemapSubtitleSelectionV3RejectsNegativeIndex(t *testing.T) {
 	}
 }
 
+// The identity remap covers a carried selection by language/format. When it
+// cannot find a counterpart, it must clear the selection rather than terminal
+// the version switch: the prod failure was a carried ordinal (20+) resumed onto
+// a 3-track edition, where nothing matches and the whole start hard-failed.
+func TestRemapSubtitleSelectionV3MissDegradesToOff(t *testing.T) {
+	source := &models.MediaFile{ID: 1, SubtitleTracks: []models.SubtitleTrack{{Language: "eng", Codec: "subrip"}}}
+	target := &models.MediaFile{ID: 2, SubtitleTracks: []models.SubtitleTrack{{Language: "fra", Codec: "subrip"}}}
+	request := playback.StartRequestV3{
+		SubtitleTrackIndex: new(0),
+		SubtitleTrackID:    playback.TrackIDV3(source.ID, "subtitle", 0),
+	}
+	handler := &PlaybackHandler{}
+	if err := handler.remapSubtitleSelectionV3(context.Background(), source, target, &request); err != nil {
+		t.Fatalf("remap miss must degrade, not error: %v", err)
+	}
+	if request.SubtitleTrackIndex != nil || request.SubtitleTrackID != "" {
+		t.Fatalf("remap miss left a selection: index=%v id=%q", request.SubtitleTrackIndex, request.SubtitleTrackID)
+	}
+}
+
+// A carried audio ordinal from a richer version (or an explicit pick the
+// effective edition lacks) degrades to the file's default track instead of
+// failing the start. Only a malformed identity stays a client error.
+func TestResolveV3AudioIndexOutOfRangeDegradesToDefault(t *testing.T) {
+	file := &models.MediaFile{ID: 7, AudioTracks: []models.AudioTrack{
+		{Codec: "aac", Language: "eng", Channels: 2},
+		{Codec: "ac3", Language: "fra", Channels: 6, Default: true},
+	}}
+	index := 20
+	got, err := resolveV3AudioIndex(file, "", &index)
+	if err != nil {
+		t.Fatalf("out-of-range audio index must degrade, not error: %v", err)
+	}
+	if want := directPlayAudioTrackIndex(file); got != want {
+		t.Fatalf("index = %d, want default %d", got, want)
+	}
+	if _, err := resolveV3AudioIndex(file, "junk", nil); err == nil {
+		t.Fatal("malformed audio identity was accepted")
+	}
+}
+
+// The carried-audio path mirrors subtitles: a missing source version or a
+// malformed identity degrades to the server's already-resolved track (ok=false)
+// instead of returning an error that would terminal the start.
+func TestResolveCarriedAudioTrackV3DegradesWhenSourceMissing(t *testing.T) {
+	target := &models.MediaFile{ID: 5, AudioTracks: []models.AudioTrack{
+		{Codec: "aac", Default: true}, {Codec: "ac3"},
+	}}
+	handler := &PlaybackHandler{}
+	if got, ok := handler.resolveCarriedAudioTrackV3(context.Background(), playback.TrackIDV3(target.ID, "audio", 1), target); !ok || got != 1 {
+		t.Fatalf("same-file carried audio = (%d, %v), want (1, true)", got, ok)
+	}
+	if got, ok := handler.resolveCarriedAudioTrackV3(context.Background(), playback.TrackIDV3(999, "audio", 0), target); ok {
+		t.Fatalf("missing source version = (%d, true), want ok=false", got)
+	}
+	if _, ok := handler.resolveCarriedAudioTrackV3(context.Background(), "not-a-track-id", target); ok {
+		t.Fatal("malformed carried identity must not resolve")
+	}
+}
+
 // downloadedSubtitleRepoByFile returns a distinct downloaded-subtitle list per
 // media file, unlike handlerMockSubtitleRepo which returns one list regardless
 // of file. Remap tests need the two versions' rows to differ.

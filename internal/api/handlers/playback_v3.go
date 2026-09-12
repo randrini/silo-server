@@ -6684,10 +6684,23 @@ func resolveV3AudioIndex(file *models.MediaFile, trackID string, fallback *int) 
 		if index == 0 {
 			return 0, nil
 		}
-		return 0, errors.New("selected audio track is unavailable")
+		// A restored/carried ordinal against a source with no probed audio is
+		// stale, not a fatal request error: fall back to the no-track default.
+		slog.Info("audio selection out of range for effective file; using default",
+			"component", "playback", "requested_index", index)
+		return 0, nil
 	}
 	if index < 0 || index >= len(file.AudioTracks) {
-		return 0, errors.New("selected audio track is unavailable")
+		// A carried/restored ordinal can outrun the effective file's track list
+		// after a version switch or candidate rotation, and an explicit pick can
+		// name a track the effective edition does not have. Both degrade to the
+		// file's default track instead of terminalling: playability wins, and the
+		// viewer can re-pick from the audio menu. Only a malformed identity or
+		// one bound to a different file (rejected above) stays an error.
+		fallbackIndex := normalizeAudioTrackIndex(file, index)
+		slog.Info("audio selection out of range for effective file; using default track",
+			"component", "playback", "file_id", file.ID, "requested_index", index, "resolved_index", fallbackIndex)
+		return fallbackIndex, nil
 	}
 	return index, nil
 }
@@ -6731,10 +6744,13 @@ func remapAudioSelectionV3(source, target *models.MediaFile, request *playback.S
 // so its ordinal is remapped by codec/language family (MatchAudioTrackAcrossVersions),
 // not by raw position, which is unstable across encodes. Falls back (ok=false)
 // to the server's preference when the source version is gone or the identity
-// cannot be parsed.
+// cannot be parsed; the caller keeps its already-resolved index, so a stale
+// carried selection degrades rather than terminating.
 func (h *PlaybackHandler) resolveCarriedAudioTrackV3(ctx context.Context, carriedID string, target *models.MediaFile) (int, bool) {
 	srcID, kind, ordinal, ok := playback.ParseTrackIDV3(carriedID)
 	if !ok || kind != "audio" || target == nil {
+		slog.InfoContext(ctx, "carried audio selection is invalid for the effective file; using resolved track",
+			"component", "playback", "carried_track_id", carriedID)
 		return 0, false
 	}
 	if srcID == target.ID {
@@ -6742,10 +6758,14 @@ func (h *PlaybackHandler) resolveCarriedAudioTrackV3(ctx context.Context, carrie
 		return normalizeAudioTrackIndex(target, ordinal), true
 	}
 	if h.fileResolver == nil {
+		slog.InfoContext(ctx, "carried audio source version is unavailable; using resolved track",
+			"component", "playback", "carried_file_id", srcID, "target_file_id", target.ID)
 		return 0, false
 	}
 	source, err := h.fileResolver.GetByID(ctx, srcID)
 	if err != nil || source == nil {
+		slog.InfoContext(ctx, "carried audio source version could not be loaded; using resolved track",
+			"component", "playback", "carried_file_id", srcID, "target_file_id", target.ID)
 		return 0, false
 	}
 	return playback.MatchAudioTrackAcrossVersions(source.AudioTracks, target.AudioTracks, ordinal), true
@@ -6848,7 +6868,17 @@ func (h *PlaybackHandler) remapSubtitleSelectionV3(ctx context.Context, source, 
 		}
 	}
 	if targetIndex < 0 {
-		return errors.New("The selected subtitle track is unavailable in the effective file version.")
+		// No equivalent track exists on the target version. A stale/carried
+		// identity must not hard-fail the version switch: clear the selection so
+		// the target plans with subtitles off and the viewer can re-pick. An
+		// out-of-range index is never handed to the subtitle policy, which would
+		// otherwise have to re-derive the same downgrade.
+		slog.InfoContext(ctx, "carried subtitle selection out of range for effective file; subtitles disabled",
+			"component", "playback", "source_file_id", source.ID, "target_file_id", target.ID,
+			"subtitle_track_index", index)
+		request.SubtitleTrackIndex = nil
+		request.SubtitleTrackID = ""
+		return nil
 	}
 	request.SubtitleTrackIndex = &targetIndex
 	request.SubtitleTrackID = playback.TrackIDV3(target.ID, "subtitle", targetIndex)
