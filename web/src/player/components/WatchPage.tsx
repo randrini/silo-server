@@ -28,6 +28,10 @@ export const INVENTORY_REFRESH_MAX_ATTEMPTS = 5;
 // Wall-clock backstop: failed requests do not count toward the attempt cap, so
 // a persistent error loop also needs an absolute deadline to stop at.
 export const INVENTORY_REFRESH_DEADLINE_MS = 5 * 60_000;
+// Must match `useWatchDetail`'s staleTime so the inventory poll, chapter
+// refresh, and realtime marker reconcile share the mounted query's cache
+// instead of each issuing an independent fetch.
+const WATCH_DETAIL_STALE_TIME_MS = 30_000;
 
 function patchChapterThumbnail(
   versions: PlayerFileVersion[],
@@ -252,7 +256,14 @@ export function WatchPage({
 
     const poll = async () => {
       try {
-        const detail = await fetchWatchDetail(contentId, mediaFileId, libraryId);
+        // Shared with the mounted `useWatchDetail` query: the same key means a
+        // poll inside the stale window reuses that payload, and concurrent
+        // callers dedupe onto one in-flight request.
+        const detail = await queryClient.fetchQuery({
+          queryKey: itemKeys.watchDetail(contentId, fileId, libraryId),
+          queryFn: () => fetchWatchDetail(contentId, fileId, libraryId),
+          staleTime: WATCH_DETAIL_STALE_TIME_MS,
+        });
         if (cancelled) return;
         // Only completed responses count toward the cap; transient fetch
         // errors are retried without burning the attempt budget.
@@ -309,8 +320,10 @@ export function WatchPage({
   }, [
     applyAudioInventory,
     contentId,
+    fileId,
     isVirtualActiveFile,
     libraryId,
+    queryClient,
     refreshSubtitles,
     session.loading,
     session.mediaFileId,
@@ -414,7 +427,7 @@ export function WatchPage({
     void queryClient.fetchQuery({
       queryKey: itemKeys.watchDetail(contentId, fileId, libraryId),
       queryFn: () => fetchWatchDetail(contentId, fileId, libraryId),
-      staleTime: 0,
+      staleTime: WATCH_DETAIL_STALE_TIME_MS,
     });
   }, [
     contentId,
@@ -447,11 +460,13 @@ export function WatchPage({
     markerRealtimeReconcileKeyRef.current = reconcileKey;
 
     let cancelled = false;
+    // Same key as the mounted `useWatchDetail` query so reconnecting does not
+    // issue a second fetch of the payload that query already holds.
     void queryClient
       .fetchQuery({
-        queryKey: itemKeys.watchDetail(contentId, activeFileId, libraryId),
-        queryFn: () => fetchWatchDetail(contentId, activeFileId, libraryId),
-        staleTime: 0,
+        queryKey: itemKeys.watchDetail(contentId, fileId, libraryId),
+        queryFn: () => fetchWatchDetail(contentId, fileId, libraryId),
+        staleTime: WATCH_DETAIL_STALE_TIME_MS,
       })
       .then((detail) => {
         if (!cancelled) {
@@ -464,6 +479,7 @@ export function WatchPage({
     };
   }, [
     contentId,
+    fileId,
     libraryId,
     queryClient,
     realtimeConnectionState,

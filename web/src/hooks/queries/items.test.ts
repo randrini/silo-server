@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement, type ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
 import type { ItemDetail } from "@/api/types";
+import { itemKeys } from "./keys";
 
 const mocks = vi.hoisted(() => ({
   api: vi.fn(),
@@ -72,6 +76,7 @@ import {
   redetectEpisodeIntro,
   useRefreshItemMetadata,
   useWatchedStateMutation,
+  useWatchDetail,
 } from "./items";
 
 type WatchedMutationOptions = {
@@ -362,5 +367,62 @@ describe("item query helpers", () => {
       user_data: { played: false },
       user_state: { played: false, is_favorite: true, in_watchlist: true },
     });
+  });
+});
+
+describe("useWatchDetail caching", () => {
+  beforeEach(() => {
+    mocks.api.mockReset();
+    mocks.api.mockResolvedValue({});
+  });
+
+  function wrapperFor(client: QueryClient) {
+    return ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+  }
+
+  it("reuses cached watch detail when remounting within the stale window", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    mocks.api.mockResolvedValue({ content_id: "movie-1", versions: [] });
+    const wrapper = wrapperFor(client);
+
+    const first = renderHook(() => useWatchDetail("movie-1", 7, 1), { wrapper });
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true));
+    expect(mocks.api).toHaveBeenCalledTimes(1);
+
+    // Navigating detail -> player -> back remounts the query. A cache entry
+    // inside the 30s stale window must be reused instead of refetched.
+    first.unmount();
+    const second = renderHook(() => useWatchDetail("movie-1", 7, 1), { wrapper });
+    await waitFor(() => expect(second.result.current.isSuccess).toBe(true));
+
+    expect(mocks.api).toHaveBeenCalledTimes(1);
+  });
+
+  it("dedupes concurrent watch detail fetches onto one network request", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let resolveApi: (value: unknown) => void = () => {};
+    mocks.api.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveApi = resolve;
+        }),
+    );
+
+    // The same options WatchPage's fetchQuery call sites and useWatchDetail
+    // build: one query key means react-query coalesces the in-flight fetch.
+    const options = {
+      queryKey: itemKeys.watchDetail("movie-1", 7, 1),
+      queryFn: () => fetchWatchDetail("movie-1", 7, 1),
+      staleTime: 30_000,
+    };
+    const first = client.fetchQuery(options);
+    const second = client.fetchQuery(options);
+
+    await vi.waitFor(() => expect(mocks.api).toHaveBeenCalledTimes(1));
+    resolveApi({ content_id: "movie-1", versions: [] });
+    await Promise.all([first, second]);
+
+    expect(mocks.api).toHaveBeenCalledTimes(1);
   });
 });

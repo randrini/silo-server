@@ -51,7 +51,11 @@ export function useWatchDetail(id: string | undefined, fileId?: number, libraryI
     queryKey: itemKeys.watchDetail(id!, fileId, libraryId),
     queryFn: () => fetchWatchDetail(id!, fileId, libraryId),
     enabled: !!id,
-    staleTime: 0,
+    // Player navigation remounts this query (detail -> player -> back). A short
+    // freshness window lets the inventory poll, chapter refresh, and realtime
+    // reconcile reach share one payload instead of each issuing its own
+    // `staleTime: 0` fetch; explicit invalidations still force a refetch.
+    staleTime: 30_000,
   });
 }
 

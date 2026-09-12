@@ -16,6 +16,7 @@ const playbackSessionMock = vi.hoisted(() => vi.fn());
 const videoPlayerMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
 const fetchWatchDetailMock = vi.hoisted(() => vi.fn());
+const fetchQueryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../hooks/usePlaybackSession", () => ({
   usePlaybackSession: playbackSessionMock,
@@ -38,7 +39,7 @@ vi.mock("../context/PlayerConfigContext", () => ({
   }),
 }));
 vi.mock("@tanstack/react-query", () => ({
-  useQueryClient: () => ({ fetchQuery: vi.fn() }),
+  useQueryClient: () => ({ fetchQuery: fetchQueryMock }),
 }));
 vi.mock("@/playback/watchPlaybackContext", () => ({
   useWatchPlaybackController: () => ({ startPlayback: vi.fn() }),
@@ -125,6 +126,13 @@ beforeEach(() => {
   playbackSessionMock.mockReset();
   videoPlayerMock.mockReset();
   toastErrorMock.mockReset();
+  fetchWatchDetailMock.mockReset();
+  // The component reads watch detail through the shared react-query cache. The
+  // fake client passes straight through to the queryFn so these tests keep
+  // exercising the poll's attempt/deadline logic; the cache dedupe itself is
+  // covered in items.test.ts.
+  fetchQueryMock.mockReset();
+  fetchQueryMock.mockImplementation((options: { queryFn: () => unknown }) => options.queryFn());
 });
 
 describe("derivePersistedSubtitleMode", () => {

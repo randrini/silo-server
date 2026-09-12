@@ -696,6 +696,12 @@ type DetailService struct {
 	copySafetyRacer   CopySafetyRacer
 	chapterThumbs     ChapterThumbnailQueuer
 
+	// watchPrepareMu guards watchPrepared, the per-content memo that keeps a
+	// repeated watch-detail fetch of unchanged files from re-running the
+	// copy-safety preparation and chapter-thumbnail enqueue on every request.
+	watchPrepareMu sync.Mutex
+	watchPrepared  map[string]watchPrepareState
+
 	// resolver is built once on first use; see settingsResolver.
 	resolverOnce sync.Once
 	resolver     *settingsresolve.Resolver
@@ -2897,8 +2903,7 @@ func (s *DetailService) GetWatchDetail(ctx context.Context, contentID string, fi
 			return nil, fmt.Errorf("fetching watch file versions: %w", err)
 		}
 		files = FilterMediaFilesByAccess(files, filter)
-		files = s.preparePlaybackFiles(ctx, files)
-		s.queueWatchPlaybackFiles(ctx, item.ContentID, item.Type, files)
+		files = s.prepareWatchFiles(ctx, item.ContentID, item.Type, files)
 		detail := s.newWatchDetail(
 			ctx,
 			item.ContentID,
@@ -2954,8 +2959,7 @@ func (s *DetailService) GetWatchDetail(ctx context.Context, contentID string, fi
 	}
 
 	files = FilterMediaFilesByAccess(files, filter)
-	files = s.preparePlaybackFiles(ctx, files)
-	s.queueWatchPlaybackFiles(ctx, episode.ContentID, "episode", files)
+	files = s.prepareWatchFiles(ctx, episode.ContentID, "episode", files)
 	detail := s.newWatchDetail(
 		ctx,
 		episode.ContentID,
@@ -3021,8 +3025,7 @@ func (s *DetailService) buildExtraWatchDetail(ctx context.Context, contentID str
 		return nil, fmt.Errorf("fetching extra watch files: %w", err)
 	}
 	files = FilterMediaFilesByAccess(files, filter)
-	files = s.preparePlaybackFiles(ctx, files)
-	s.queueWatchPlaybackFiles(ctx, extra.ContentID, "extra", files)
+	files = s.prepareWatchFiles(ctx, extra.ContentID, "extra", files)
 	detail := s.newWatchDetail(
 		ctx,
 		extra.ContentID,
@@ -3607,6 +3610,16 @@ func (s *DetailService) buildPlaybackInfo(
 	// would otherwise re-query the profile/preference rows for every file.
 	audioResolver := s.newAudioPrefResolver(ctx, filter, audioPreferenceContentID)
 
+	// Runtime fallbacks are request-invariant too. Every file in one call shares
+	// one item (movies, extras) and, for episode versions, one episode, so a
+	// multi-version item used to pay a fresh GetByID per version when its files
+	// carried no duration. Memoize within the call so each distinct ID costs one
+	// lookup; the zero value also records "looked up, no runtime" so a failed or
+	// empty lookup is not retried per file. Keys are the raw IDs, so a caller
+	// that ever mixes episodes still resolves each one correctly.
+	episodeDuration := make(map[string]int)
+	itemDuration := make(map[string]int)
+
 	for _, f := range files {
 		if f == nil {
 			continue
@@ -3630,16 +3643,28 @@ func (s *DetailService) buildPlaybackInfo(
 		}
 
 		fileDuration := f.Duration
-		if fileDuration <= 0 {
-			if f.EpisodeID != "" && s.episodeRepo != nil {
+		if fileDuration <= 0 && f.EpisodeID != "" && s.episodeRepo != nil {
+			if cached, ok := episodeDuration[f.EpisodeID]; ok {
+				fileDuration = cached
+			} else {
+				duration := 0
 				if ep, epErr := s.episodeRepo.GetByID(ctx, f.EpisodeID); epErr == nil && ep != nil && ep.Runtime > 0 {
-					fileDuration = ep.Runtime * 60
+					duration = ep.Runtime * 60
 				}
+				episodeDuration[f.EpisodeID] = duration
+				fileDuration = duration
 			}
-			if fileDuration <= 0 && f.ContentID != "" && s.itemRepo != nil {
+		}
+		if fileDuration <= 0 && f.ContentID != "" && s.itemRepo != nil {
+			if cached, ok := itemDuration[f.ContentID]; ok {
+				fileDuration = cached
+			} else {
+				duration := 0
 				if item, itemErr := s.itemRepo.GetByID(ctx, f.ContentID); itemErr == nil && item != nil && item.Runtime > 0 {
-					fileDuration = item.Runtime * 60
+					duration = item.Runtime * 60
 				}
+				itemDuration[f.ContentID] = duration
+				fileDuration = duration
 			}
 		}
 
@@ -4013,6 +4038,95 @@ func (s *DetailService) queueWatchPlaybackFiles(
 		len(fileIDs),
 	)
 	s.chapterThumbs.QueueFileIDs(ctx, fileIDs)
+}
+
+// watchPrepareTTL bounds how long a repeated watch-detail fetch trusts the
+// preparation done for the same content. Probe repair is persisted and the
+// copy-safety verdict is memoized, and chapter extraction dedupes in-flight
+// work, so within the TTL the preparation is a replay of work that is already
+// settled. Past the TTL the work is reissued so a file whose probe or
+// thumbnail generation failed still retries without waiting for a restart.
+const watchPrepareTTL = 5 * time.Minute
+
+// watchPreparedMaxEntries bounds the memo so a long-lived process that sees
+// many distinct watch targets cannot accumulate one entry per title forever. It
+// is only a ceiling: expired entries are pruned first, so a busy server sheds
+// stale targets rather than live ones.
+const watchPreparedMaxEntries = 4096
+
+// watchPrepareState records one prepared watch target: the identity of the file
+// set it was prepared against (watchFilesFingerprint) and when.
+type watchPrepareState struct {
+	fingerprint string
+	preparedAt  time.Time
+}
+
+// watchFilesFingerprint identifies a file set by the fields probe repair would
+// change: file IDs and probe_updated_at. If a rescan or repair rewrites any of
+// them the fingerprint changes and the next fetch prepares again; otherwise the
+// previous preparation is still valid.
+func watchFilesFingerprint(files []*models.MediaFile) string {
+	var b strings.Builder
+	for _, file := range files {
+		if file == nil {
+			continue
+		}
+		b.WriteString(strconv.Itoa(file.ID))
+		b.WriteByte(':')
+		if file.ProbeUpdatedAt != nil {
+			b.WriteString(strconv.FormatInt(file.ProbeUpdatedAt.UnixNano(), 10))
+		}
+		b.WriteByte('|')
+	}
+	return b.String()
+}
+
+// prepareWatchFiles prepares a watch target once per unchanged file set.
+//
+// Every watch-detail fetch used to repair probe metadata, resolve the cached
+// copy-safety verdict and enqueue chapter thumbnails for all of its files. All
+// three are idempotent, but the enqueue still costs a database read per file in
+// the chapter-thumbnail worker on every page load, so a client polling watch
+// detail paid for the same unchangeable work repeatedly. This memo collapses
+// repeat fetches of an unchanged file set to a map lookup. The first fetch for
+// a target (and any fetch after the probe state changes or the TTL lapses)
+// still prepares everything.
+func (s *DetailService) prepareWatchFiles(
+	ctx context.Context,
+	contentID string,
+	contentType string,
+	files []*models.MediaFile,
+) []*models.MediaFile {
+	if s == nil {
+		return files
+	}
+	fingerprint := watchFilesFingerprint(files)
+	now := time.Now()
+
+	s.watchPrepareMu.Lock()
+	previous, seen := s.watchPrepared[contentID]
+	s.watchPrepareMu.Unlock()
+	if seen && previous.fingerprint == fingerprint && now.Sub(previous.preparedAt) < watchPrepareTTL {
+		return files
+	}
+
+	prepared := s.preparePlaybackFiles(ctx, files)
+	s.queueWatchPlaybackFiles(ctx, contentID, contentType, prepared)
+
+	s.watchPrepareMu.Lock()
+	if s.watchPrepared == nil {
+		s.watchPrepared = make(map[string]watchPrepareState)
+	}
+	if len(s.watchPrepared) >= watchPreparedMaxEntries {
+		for id, state := range s.watchPrepared {
+			if now.Sub(state.preparedAt) >= watchPrepareTTL {
+				delete(s.watchPrepared, id)
+			}
+		}
+	}
+	s.watchPrepared[contentID] = watchPrepareState{fingerprint: fingerprint, preparedAt: now}
+	s.watchPrepareMu.Unlock()
+	return prepared
 }
 
 func (s *DetailService) buildVersionChapters(ctx context.Context, file *models.MediaFile) []VersionChapter {

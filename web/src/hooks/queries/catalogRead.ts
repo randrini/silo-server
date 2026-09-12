@@ -96,6 +96,11 @@ export function useCatalogItemDetail(id: string | undefined, libraryId?: number)
     queryKey: catalogKeys.itemDetail(id!, libraryId),
     queryFn: () => fetchCatalogItemDetail(id!, libraryId),
     enabled: !!id,
+    // Detail pages are remounted on navigation (e.g. detail -> player -> back).
+    // A short freshness window reuses the cached payload instead of refetching
+    // identical data, while mutations still invalidate immediately and a
+    // server-side change is picked up within half a minute.
+    staleTime: 30_000,
   });
 }
 
