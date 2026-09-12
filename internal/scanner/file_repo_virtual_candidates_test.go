@@ -808,3 +808,114 @@ func TestReplaceVirtualResultPin_NoCollisionReplaces(t *testing.T) {
 		t.Fatalf("file path was not replaced on no collision: got %q, want %q", currentPath, livePath)
 	}
 }
+
+// TestReplaceVirtualCandidatesRetainsDelivered covers the delivery-evidence
+// retention rule in ReplaceVirtualCandidates: a stale candidate that once
+// delivered media bytes (last_delivered_at set) survives a provider re-list
+// even when no user_watch_progress row points at it, an undelivered stale
+// candidate is still deleted, and a re-listed known-good row keeps its
+// evidence while a fresh listing clears its failed_at.
+func TestReplaceVirtualCandidatesRetainsDelivered(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	contentID := fmt.Sprintf("virtual-retain-delivered-%d", suffix)
+	basePath := fmt.Sprintf("virtual://movie/tt%d?profile=1080p", suffix)
+	deliveredPath := basePath + "&result=delivered"
+	unplayedPath := basePath + "&result=unplayed"
+	relistedPath := basePath + "&result=relisted"
+
+	var folderID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_folders(type,name,enabled)
+		VALUES('movies',$1,true) RETURNING id`, fmt.Sprintf("Retain Delivered %d", suffix)).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_item_libraries WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id=$1`, folderID)
+	})
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_items(content_id,type,title,status,genres)
+		VALUES($1,'movie','Retain Delivered','matched','{}'::text[])`, contentID); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+
+	seed := func(path string, failed bool, delivered bool) int {
+		var failedAt, deliveredAt *time.Time
+		if failed {
+			now := time.Now()
+			failedAt = &now
+		}
+		if delivered {
+			now := time.Now()
+			deliveredAt = &now
+		}
+		var id int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files(content_id,media_folder_id,file_path,file_size,container,virtual_owner_installation_id,failed_at,last_delivered_at)
+			VALUES($1,$2,$3,0,'virtual',11,$4,$5) RETURNING id`,
+			contentID, folderID, path, failedAt, deliveredAt).Scan(&id); err != nil {
+			t.Fatalf("seed virtual file %q: %v", path, err)
+		}
+		return id
+	}
+	deliveredID := seed(deliveredPath, false, true)
+	_ = seed(unplayedPath, false, false)
+	// The re-listed row is seeded failed to prove a fresh listing clears it.
+	relistedID := seed(relistedPath, true, true)
+
+	repo := NewFileRepository(pool)
+	source := &models.MediaFile{
+		ContentID:                  contentID,
+		MediaFolderID:              folderID,
+		FilePath:                   basePath,
+		VirtualOwnerInstallationID: 11,
+	}
+	// The re-list drops delivered and unplayed; only relisted is offered again.
+	if err := repo.ReplaceVirtualCandidates(ctx, source, []VirtualCandidate{{URI: relistedPath, Label: "1080p"}}); err != nil {
+		t.Fatalf("replace virtual candidates: %v", err)
+	}
+
+	read := func(id int) (path string, failedAt, lastDeliveredAt *time.Time) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT file_path, failed_at, last_delivered_at FROM media_files WHERE id=$1`, id).
+			Scan(&path, &failedAt, &lastDeliveredAt); err != nil {
+			t.Fatalf("read virtual file %d: %v", id, err)
+		}
+		return path, failedAt, lastDeliveredAt
+	}
+
+	// The delivered row survives the re-list with its evidence intact.
+	deliveredPathNow, deliveredFailed, deliveredEvidence := read(deliveredID)
+	if deliveredPathNow != deliveredPath || deliveredFailed != nil || deliveredEvidence == nil {
+		t.Fatalf("delivered stale row not retained: path=%q failed=%v delivered=%v", deliveredPathNow, deliveredFailed, deliveredEvidence)
+	}
+
+	// The undelivered row is deleted.
+	var unplayedCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM media_files WHERE content_id=$1 AND file_path=$2`, contentID, unplayedPath).Scan(&unplayedCount); err != nil {
+		t.Fatalf("count undelivered stale row: %v", err)
+	}
+	if unplayedCount != 0 {
+		t.Fatalf("undelivered stale candidate survived: count=%d, want 0", unplayedCount)
+	}
+
+	// The re-listed row keeps its id and delivery evidence while the fresh
+	// listing clears failed_at.
+	relistedPathNow, relistedFailed, relistedEvidence := read(relistedID)
+	if relistedPathNow != relistedPath || relistedFailed != nil || relistedEvidence == nil {
+		t.Fatalf("relisted known-good row not updated: path=%q failed=%v delivered=%v", relistedPathNow, relistedFailed, relistedEvidence)
+	}
+}

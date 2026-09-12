@@ -398,3 +398,190 @@ func TestMarkVirtualCandidateRecoveredFencing(t *testing.T) {
 		}
 	})
 }
+
+// TestMarkVirtualCandidateRecoveredStampsLastDelivered verifies that a real
+// delivery records durable last_delivered_at evidence in the same UPDATE that
+// clears failed_at, and that the write stays fenced: a late delivery of a
+// candidate the row no longer describes stamps nothing.
+func TestMarkVirtualCandidateRecoveredStampsLastDelivered(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	contentID := fmt.Sprintf("recovered-delivered-%d", suffix)
+	originalPath := fmt.Sprintf("virtual://movie/tt%d?result=original", suffix)
+
+	var folderID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_folders(type,name,enabled)
+		VALUES('movies',$1,true) RETURNING id`, fmt.Sprintf("Recovered Delivered %d", suffix)).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_item_libraries WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id=$1`, folderID)
+	})
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_items(content_id,type,title,status,genres)
+		VALUES($1,'movie','Recovered Delivered','matched','{}'::text[])`, contentID); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+
+	var fileID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_files(content_id,media_folder_id,file_path,file_size,container,virtual_owner_installation_id,failed_at)
+		VALUES($1,$2,$3,1000,'virtual',7,NOW()) RETURNING id`,
+		contentID, folderID, originalPath).Scan(&fileID); err != nil {
+		t.Fatalf("seed virtual file: %v", err)
+	}
+
+	repo := NewFileRepository(pool)
+	readRow := func() (failedAt, lastDeliveredAt *time.Time) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT failed_at, last_delivered_at FROM media_files WHERE id=$1`, fileID).
+			Scan(&failedAt, &lastDeliveredAt); err != nil {
+			t.Fatalf("read recovery row: %v", err)
+		}
+		return failedAt, lastDeliveredAt
+	}
+
+	// Never delivered yet.
+	if _, lastDeliveredAt := readRow(); lastDeliveredAt != nil {
+		t.Fatalf("precondition: last_delivered_at = %v, want NULL", lastDeliveredAt)
+	}
+
+	// A late delivery of a candidate the row no longer describes is a no-op:
+	// neither failed_at nor last_delivered_at may change.
+	if _, err := pool.Exec(ctx, `UPDATE media_files SET file_path=$1 WHERE id=$2`, originalPath+"-rotated", fileID); err != nil {
+		t.Fatalf("rotate row: %v", err)
+	}
+	failedAt, _ := readRow()
+	if err := repo.MarkVirtualCandidateRecovered(ctx, fileID, originalPath, failedAt); err != nil {
+		t.Fatalf("stale recovery: %v", err)
+	}
+	if _, lastDeliveredAt := readRow(); lastDeliveredAt != nil {
+		t.Fatal("stale recovery stamped last_delivered_at on a rotated row")
+	}
+
+	// Matching identity and observed health state: both columns move together.
+	if _, err := pool.Exec(ctx, `UPDATE media_files SET file_path=$1, failed_at=NOW(), last_delivered_at=NULL WHERE id=$2`, originalPath, fileID); err != nil {
+		t.Fatalf("reset row: %v", err)
+	}
+	failedAt, _ = readRow()
+	if failedAt == nil {
+		t.Fatal("precondition: row must start stamped failed")
+	}
+	if err := repo.MarkVirtualCandidateRecovered(ctx, fileID, originalPath, failedAt); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	failedAt, lastDeliveredAt := readRow()
+	if failedAt != nil {
+		t.Fatalf("recovery did not clear failed_at: %v", failedAt)
+	}
+	if lastDeliveredAt == nil {
+		t.Fatal("recovery did not stamp last_delivered_at")
+	}
+}
+
+// TestMarkVirtualCandidateFailedDefersKnownGood verifies the delivered-grace
+// rule on the failed_at stamp: a known-good row inside
+// VirtualCandidateDeliveryGrace is not branded dead by a later failure, while a
+// row that never delivered (and a known-good row whose delivery is older than
+// the grace) stamps immediately.
+func TestMarkVirtualCandidateFailedDefersKnownGood(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	contentID := fmt.Sprintf("failed-grace-%d", suffix)
+
+	var folderID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_folders(type,name,enabled)
+		VALUES('movies',$1,true) RETURNING id`, fmt.Sprintf("Failed Grace %d", suffix)).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_item_libraries WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id=$1`, folderID)
+	})
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_items(content_id,type,title,status,genres)
+		VALUES($1,'movie','Failed Grace','matched','{}'::text[])`, contentID); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+
+	repo := NewFileRepository(pool)
+	seed := func(path string, lastDeliveredAt *time.Time) int {
+		var id int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files(content_id,media_folder_id,file_path,file_size,container,virtual_owner_installation_id,last_delivered_at)
+			VALUES($1,$2,$3,1000,'virtual',7,$4) RETURNING id`,
+			contentID, folderID, path, lastDeliveredAt).Scan(&id); err != nil {
+			t.Fatalf("seed virtual file %q: %v", path, err)
+		}
+		return id
+	}
+	readFailedAt := func(id int) *time.Time {
+		t.Helper()
+		var failedAt *time.Time
+		if err := pool.QueryRow(ctx, `SELECT failed_at FROM media_files WHERE id=$1`, id).Scan(&failedAt); err != nil {
+			t.Fatalf("read failed_at: %v", err)
+		}
+		return failedAt
+	}
+
+	freshly := time.Now().Add(-time.Hour)
+	knownGoodPath := fmt.Sprintf("virtual://movie/tt%d?result=known-good", suffix)
+	knownGoodID := seed(knownGoodPath, &freshly)
+
+	// First failure within the grace window: no stamp, so the auto-pick keeps
+	// preferring the known-good candidate for a re-verify.
+	if err := repo.MarkVirtualCandidateFailed(ctx, knownGoodID, knownGoodPath, nil); err != nil {
+		t.Fatalf("mark known-good failed: %v", err)
+	}
+	if readFailedAt(knownGoodID) != nil {
+		t.Fatal("known-good candidate was branded dead inside the delivery grace")
+	}
+
+	// Once the delivery evidence is older than the grace, a failure stamps.
+	if _, err := pool.Exec(ctx, `UPDATE media_files SET last_delivered_at = NOW() - INTERVAL '8 days' WHERE id=$1`, knownGoodID); err != nil {
+		t.Fatalf("age delivery evidence: %v", err)
+	}
+	if err := repo.MarkVirtualCandidateFailed(ctx, knownGoodID, knownGoodPath, nil); err != nil {
+		t.Fatalf("mark aged known-good failed: %v", err)
+	}
+	if readFailedAt(knownGoodID) == nil {
+		t.Fatal("aged known-good candidate was not stamped after the grace expired")
+	}
+
+	// A candidate that never delivered stamps on the first failure.
+	neverDeliveredPath := fmt.Sprintf("virtual://movie/tt%d?result=never-delivered", suffix)
+	neverDeliveredID := seed(neverDeliveredPath, nil)
+	if err := repo.MarkVirtualCandidateFailed(ctx, neverDeliveredID, neverDeliveredPath, nil); err != nil {
+		t.Fatalf("mark never-delivered failed: %v", err)
+	}
+	if readFailedAt(neverDeliveredID) == nil {
+		t.Fatal("never-delivered candidate was not stamped")
+	}
+}

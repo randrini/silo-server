@@ -140,6 +140,51 @@ func TestHandleStreamRecoveryResolvedIdentity(t *testing.T) {
 	}
 }
 
+// TestHandleStreamRecoveryStampsHealthyFirstDelivery verifies the delivery
+// evidence marker fires even when the candidate was never failed. The marker
+// now also records durable last_delivered_at evidence, so a healthy first play
+// must reach it. (The no-bytes case is covered by
+// TestHandleStreamRecoveryResolvedIdentity.)
+func TestHandleStreamRecoveryStampsHealthyFirstDelivery(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("media"))
+	}))
+	defer upstream.Close()
+	file := &models.MediaFile{ID: 42, FilePath: "virtual://movie/test?result=A", VirtualOwnerInstallationID: 7}
+	manager := playback.NewSessionManager(0, 0)
+	session, err := manager.StartSession(1, "profile-1", file.ID, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewStreamHandler(manager, testPlaybackFileResolver{file: file})
+	ffmpeg := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte("#!/bin/sh\nprintf media\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.PlaybackConfig = func() config.PlaybackConfig { return config.PlaybackConfig{FFmpegPath: ffmpeg} }
+	h.VirtualMediaDetailedResolver = VirtualMediaDetailedResolverFunc(func(context.Context, string, int, int, string, bool, []string, string) (ResolvedVirtualMedia, error) {
+		return ResolvedVirtualMedia{URL: upstream.URL, URI: file.FilePath, CandidateID: "A"}, nil
+	})
+	calls := 0
+	h.VirtualCandidateRecoveredMarker = func(_ context.Context, id int, path string, observed *time.Time) error {
+		calls++
+		if path != file.FilePath || observed != nil {
+			t.Fatalf("recovery marker: path=%q observed=%v", path, observed)
+		}
+		return nil
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/"+session.ID, nil).WithContext(newAuthorizedPlaybackContext())
+	req = withPlaybackRouteParam(req, "session_id", session.ID)
+	rec := httptest.NewRecorder()
+	h.HandleStream(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
+		t.Fatalf("delivery: %d %s", rec.Code, rec.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("recovery marker calls = %d, want 1", calls)
+	}
+}
+
 func TestHandleStream_VirtualDirectPlayUsesPinnedRelayPathAndHeaders(t *testing.T) {
 	var gotPath, gotRange, gotReferer string
 	var gotQuery url.Values

@@ -1193,8 +1193,16 @@ func NewRouter(deps Dependencies) chi.Router {
 			streamHandler.AllowInsecureVirtual = playbackHandler.AllowInsecureVirtual
 		}
 		if deps.DB != nil {
+			// Transport no-bytes failure path. Same delivered-grace rule as
+			// scanner.MarkVirtualCandidateFailed: a candidate that delivered
+			// bytes within scanner.VirtualCandidateDeliveryGrace is not branded
+			// dead by a single later failure, so the auto-pick keeps preferring
+			// and re-verifying it.
 			streamHandler.VirtualCandidateFailMarker = func(ctx context.Context, fileID int) error {
-				_, err := deps.DB.Exec(ctx, `UPDATE media_files SET failed_at = NOW(), updated_at = NOW() WHERE id = $1`, fileID)
+				_, err := deps.DB.Exec(ctx, `UPDATE media_files SET failed_at = NOW(), updated_at = NOW()
+					WHERE id = $1
+					  AND (last_delivered_at IS NULL OR last_delivered_at < NOW() - make_interval(secs => $2))`,
+					fileID, scanner.VirtualCandidateDeliveryGrace.Seconds())
 				return err
 			}
 			// The recovered marker clears a known-bad stamp after the candidate

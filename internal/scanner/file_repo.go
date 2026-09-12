@@ -1294,12 +1294,17 @@ func (r *FileRepository) ReplaceVirtualCandidates(ctx context.Context, source *m
 		// from the version list when the provider re-lists with new result ids.
 		// A retained row keeps its failed_at; if it was healthy it stays
 		// selectable (a fresh listing would clear failed_at), so it remains
-		// visible until the provider truly stops offering it. These retained
-		// rows have no cleanup path here; a future retention TTL may prune them
-		// once no progress row references them (not implemented).
+		// visible until the provider truly stops offering it.
+		//
+		// A row that actually delivered media bytes (last_delivered_at set) is
+		// retained on the same principle even if no progress row points at it:
+		// "once worked" is stronger evidence than "recently listed". These
+		// retained rows have no cleanup path here; a future retention TTL may
+		// prune them (not implemented).
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM media_files
 			WHERE id = ANY($1::bigint[])
+			  AND last_delivered_at IS NULL
 			  AND NOT EXISTS (
 				SELECT 1 FROM user_watch_progress p
 				WHERE p.last_file_id = media_files.id
@@ -1325,9 +1330,33 @@ func virtualCandidateGroup(raw string) (string, bool) {
 	return parsed.String(), true
 }
 
+// VirtualCandidateDeliveryGrace is how long after a virtual candidate's last
+// successful delivery a later failure is forgiven (failed_at is not stamped).
+// A release that played recently should not be branded dead because the
+// provider flapped today: within the window the row stays selectable and the
+// auto-pick keeps preferring it for a re-verify. After the window, an absence
+// of fresh delivery evidence means a failure stamps normally. The same window
+// guards the transport no-bytes marker.
+const VirtualCandidateDeliveryGrace = 7 * 24 * time.Hour
+
+// virtualCandidateFailureGracePredicate is the SQL predicate that any failed_at
+// stamp site applies: known-good rows inside the delivery grace are skipped,
+// while rows that never delivered (or whose last delivery is stale) stamp as
+// before. It consumes the query's next placeholder as the grace in seconds. The
+// transport no-bytes marker in NewRouter applies the equivalent predicate
+// directly (it does not go through this package); keep the two in sync if the
+// rule changes.
+const virtualCandidateFailureGracePredicate = `(last_delivered_at IS NULL OR last_delivered_at < NOW() - make_interval(secs => $4))`
+
 // MarkVirtualCandidateFailed stamps a virtual candidate row as known-bad after
 // a transport produced no bytes (corrupted NZB, dead provider URL). The
 // auto-pick skips failed candidates; a fresh listing clears the flag.
+//
+// A known-good row (last_delivered_at set) inside VirtualCandidateDeliveryGrace
+// is not stamped: the failure is treated as a transient flap and the candidate
+// stays eligible for the next auto-pick. This is the "prefer a release that
+// once delivered" rule, paired with the retention guard in
+// ReplaceVirtualCandidates that never deletes known-good rows.
 //
 // The write is fenced on the candidate identity the caller actually inspected:
 // expectedFilePath must still be the row's file_path and observedFailedAt must
@@ -1343,7 +1372,10 @@ func (r *FileRepository) MarkVirtualCandidateFailed(ctx context.Context, fileID 
 	if fileID <= 0 {
 		return nil
 	}
-	_, err := r.pool.Exec(ctx, `UPDATE media_files SET failed_at = NOW(), updated_at = NOW() WHERE id = $1 AND file_path = $2 AND failed_at IS NOT DISTINCT FROM $3`, fileID, expectedFilePath, observedFailedAt)
+	query := `UPDATE media_files SET failed_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND file_path = $2 AND failed_at IS NOT DISTINCT FROM $3
+		  AND ` + virtualCandidateFailureGracePredicate
+	_, err := r.pool.Exec(ctx, query, fileID, expectedFilePath, observedFailedAt, VirtualCandidateDeliveryGrace.Seconds())
 	return err
 }
 
@@ -1368,7 +1400,8 @@ func (r *FileRepository) ClearVirtualCandidateFailed(ctx context.Context, fileID
 	return err
 }
 
-// MarkVirtualCandidateRecovered clears a virtual candidate's failed_at stamp
+// MarkVirtualCandidateRecovered records durable delivery evidence for a
+// virtual candidate: it clears the failed_at stamp and sets last_delivered_at
 // after that candidate actually delivered media bytes to a client. This is the
 // transport-delivery counterpart to ClearVirtualCandidateFailed: the caller
 // passes the candidate identity the transport served (the row's file_path AT
@@ -1376,7 +1409,11 @@ func (r *FileRepository) ClearVirtualCandidateFailed(ctx context.Context, fileID
 // failure timestamp observed when the transport started, so the write only
 // lands when the row still describes the delivered candidate in the observed
 // health state. A rotated row (now describing candidate B) or a newer failure
-// stamp on candidate A is never cleared by a late delivery of A.
+// stamp on candidate A is never cleared or re-stamped by a late delivery of A.
+//
+// The two column writes are deliberately one UPDATE: delivery evidence and the
+// failed_at clear happen atomically, so a reader never sees a cleared stamp
+// without the corresponding delivery timestamp (or vice versa).
 func (r *FileRepository) MarkVirtualCandidateRecovered(ctx context.Context, fileID int, deliveredFilePath string, observedFailedAt *time.Time) error {
 	if r == nil || r.pool == nil {
 		return errors.New("file repository is not configured")
@@ -1384,7 +1421,7 @@ func (r *FileRepository) MarkVirtualCandidateRecovered(ctx context.Context, file
 	if fileID <= 0 || strings.TrimSpace(deliveredFilePath) == "" {
 		return nil
 	}
-	_, err := r.pool.Exec(ctx, `UPDATE media_files SET failed_at = NULL, updated_at = NOW() WHERE id = $1 AND file_path = $2 AND failed_at IS NOT DISTINCT FROM $3 AND (container = 'virtual' OR file_path LIKE 'virtual://%')`, fileID, deliveredFilePath, observedFailedAt)
+	_, err := r.pool.Exec(ctx, `UPDATE media_files SET failed_at = NULL, last_delivered_at = NOW(), updated_at = NOW() WHERE id = $1 AND file_path = $2 AND failed_at IS NOT DISTINCT FROM $3 AND (container = 'virtual' OR file_path LIKE 'virtual://%')`, fileID, deliveredFilePath, observedFailedAt)
 	return err
 }
 
