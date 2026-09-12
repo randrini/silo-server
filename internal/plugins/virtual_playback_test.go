@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -842,19 +843,21 @@ func TestResolvedURLMemoIsBoundedAndExpires(t *testing.T) {
 		t.Fatalf("memo entries = %d, want %d", got, resolvedURLMemoMax)
 	}
 
-	// A stored entry is served within its TTL and dropped once stale.
+	// A stored entry is served within its TTL and dropped once it is past the
+	// bounded stale grace (a bare Service cannot refresh, so no in-flight
+	// refresh keeps it alive).
 	service.storeResolvedURL("virtual://movie/tt000001", 1, "kid", 7, "https://1.1.1.1/fresh")
 	if got := service.lookupResolvedURL("virtual://movie/tt000001", 1, "kid", 7); got != "https://1.1.1.1/fresh" {
 		t.Fatalf("lookup = %q, want freshly stored URL", got)
 	}
 	entry := service.resolvedURLs[resolvedURLMemoKey("virtual://movie/tt000001", 1, "kid", 7)]
-	entry.resolvedAt = entry.resolvedAt.Add(-(resolvedURLMemoTTL + time.Second))
+	entry.resolvedAt = entry.resolvedAt.Add(-(resolvedURLMemoTTL + resolvedURLMemoStaleGrace + time.Second))
 	service.resolvedURLs[resolvedURLMemoKey("virtual://movie/tt000001", 1, "kid", 7)] = entry
 	if got := service.lookupResolvedURL("virtual://movie/tt000001", 1, "kid", 7); got != "" {
-		t.Fatalf("lookup = %q, want expired entry dropped", got)
+		t.Fatalf("lookup = %q, want entry past stale grace dropped", got)
 	}
 	if _, ok := service.resolvedURLs[resolvedURLMemoKey("virtual://movie/tt000001", 1, "kid", 7)]; ok {
-		t.Fatal("expired entry remained after lookup")
+		t.Fatal("entry past stale grace remained after lookup")
 	}
 
 	// Clear flushes memoized resolved URLs instantly.
@@ -863,6 +866,160 @@ func TestResolvedURLMemoIsBoundedAndExpires(t *testing.T) {
 	if got := service.lookupResolvedURL("virtual://movie/tt000001", 1, "kid", 7); got != "" {
 		t.Fatalf("lookup = %q, want empty after Clear", got)
 	}
+}
+
+// seedResolvedURLEntry installs a memo entry directly so a test can control its
+// age without waiting on the TTL or starting a warm-refresh timer.
+func seedResolvedURLEntry(service *Service, key, url string, age time.Duration) {
+	service.resolvedURLsMu.Lock()
+	defer service.resolvedURLsMu.Unlock()
+	if service.resolvedURLs == nil {
+		service.resolvedURLs = make(map[string]resolvedURLEntry)
+	}
+	service.resolvedURLs[key] = resolvedURLEntry{
+		url:        url,
+		uri:        "virtual://movie/tt1234",
+		resolvedAt: time.Now().Add(-age),
+	}
+}
+
+func waitForResolvedURLValue(t *testing.T, service *Service, virtualPath string, userID int, profileID string, ownerInstallationID int, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := service.lookupResolvedURL(virtualPath, userID, profileID, ownerInstallationID); got == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("resolved URL = %q, want %q", service.lookupResolvedURL(virtualPath, userID, profileID, ownerInstallationID), want)
+}
+
+func waitForResolvedURLRefreshFailure(t *testing.T, service *Service, key string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		service.resolvedURLsMu.Lock()
+		entry, ok := service.resolvedURLs[key]
+		failed := ok && entry.refreshFailed
+		service.resolvedURLsMu.Unlock()
+		if failed {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("background refresh failure was not recorded")
+}
+
+// A memo entry past its TTL but inside resolvedURLMemoStaleGrace is served
+// while exactly one background refresh replaces it.
+func TestResolvedURLMemoServesStaleWithinGraceAndRefreshes(t *testing.T) {
+	service, calls := newVirtualPlaybackTestService(t,
+		func(context.Context, *pluginv1.ResolveVirtualStreamRequest) (*pluginv1.ResolveVirtualStreamResponse, error) {
+			return virtualResponse(virtualCandidate("fresh", "https://1.1.1.1/fresh")), nil
+		},
+	)
+	const path = "virtual://movie/tt1234"
+	key := resolvedURLMemoKey(path, 7, "p1", 101)
+	seedResolvedURLEntry(service, key, "https://1.1.1.1/stale", resolvedURLMemoTTL+time.Minute)
+
+	res, ok := service.lookupResolvedStream(path, 7, "p1", 101)
+	if !ok || res.URL != "https://1.1.1.1/stale" {
+		t.Fatalf("stale lookup = (%#v, %v), want cached stale URL served", res, ok)
+	}
+
+	waitForResolvedURLValue(t, service, path, 7, "p1", 101, "https://1.1.1.1/fresh")
+	if got := calls[101].Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1 refresh", got)
+	}
+}
+
+// A provider-declared expiry is a hard bound: the entry is never served stale
+// even though it is inside the TTL-based grace window.
+func TestResolvedURLMemoNeverServesPastProviderExpiry(t *testing.T) {
+	service, _ := newVirtualPlaybackTestService(t,
+		func(context.Context, *pluginv1.ResolveVirtualStreamRequest) (*pluginv1.ResolveVirtualStreamResponse, error) {
+			return virtualResponse(virtualCandidate("fresh", "https://1.1.1.1/fresh")), nil
+		},
+	)
+	const path = "virtual://movie/tt1234"
+	key := resolvedURLMemoKey(path, 7, "p1", 101)
+	seedResolvedURLEntry(service, key, "https://1.1.1.1/dead", resolvedURLMemoTTL+time.Minute)
+	entry := service.resolvedURLs[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	service.resolvedURLsMu.Lock()
+	service.resolvedURLs[key] = entry
+	service.resolvedURLsMu.Unlock()
+
+	if _, ok := service.lookupResolvedStream(path, 7, "p1", 101); ok {
+		t.Fatal("entry past provider expiry was served")
+	}
+	if _, exists := service.resolvedURLs[key]; exists {
+		t.Fatal("entry past provider expiry was not deleted")
+	}
+}
+
+// A definitive refresh failure must not have the stale URL pinned: the entry is
+// dropped instead of extended.
+func TestResolvedURLMemoDropsStaleAfterDefinitiveRefreshFailure(t *testing.T) {
+	service, _ := newVirtualPlaybackTestService(t,
+		func(context.Context, *pluginv1.ResolveVirtualStreamRequest) (*pluginv1.ResolveVirtualStreamResponse, error) {
+			return nil, errors.New("provider unavailable")
+		},
+	)
+	const path = "virtual://movie/tt1234"
+	key := resolvedURLMemoKey(path, 7, "p1", 101)
+	seedResolvedURLEntry(service, key, "https://1.1.1.1/stale", resolvedURLMemoTTL+time.Minute)
+
+	if res, ok := service.lookupResolvedStream(path, 7, "p1", 101); !ok || res.URL != "https://1.1.1.1/stale" {
+		t.Fatalf("stale lookup = (%#v, %v), want cached stale URL served", res, ok)
+	}
+	waitForResolvedURLRefreshFailure(t, service, key)
+	if _, ok := service.lookupResolvedStream(path, 7, "p1", 101); ok {
+		t.Fatal("stale entry served after a definitive refresh failure")
+	}
+	if _, exists := service.resolvedURLs[key]; exists {
+		t.Fatal("failed stale entry was not deleted")
+	}
+}
+
+// Concurrent stale lookups must not each spawn a refresh: the first caller
+// marks the refresh in flight and the provider is contacted once.
+func TestResolvedURLMemoStaleRefreshSingleFlight(t *testing.T) {
+	release := make(chan struct{})
+	service, calls := newVirtualPlaybackTestService(t,
+		func(context.Context, *pluginv1.ResolveVirtualStreamRequest) (*pluginv1.ResolveVirtualStreamResponse, error) {
+			<-release
+			return virtualResponse(virtualCandidate("fresh", "https://1.1.1.1/fresh")), nil
+		},
+	)
+	const path = "virtual://movie/tt1234"
+	key := resolvedURLMemoKey(path, 7, "p1", 101)
+	seedResolvedURLEntry(service, key, "https://1.1.1.1/stale", resolvedURLMemoTTL+time.Minute)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, ok := service.lookupResolvedStream(path, 7, "p1", 101)
+			if !ok || res.URL != "https://1.1.1.1/stale" {
+				t.Errorf("stale lookup = (%#v, %v), want cached stale URL served", res, ok)
+			}
+		}()
+	}
+	wg.Wait()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for calls[101].Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls[101].Load(); got != 1 {
+		close(release)
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	close(release)
+	waitForResolvedURLValue(t, service, path, 7, "p1", 101, "https://1.1.1.1/fresh")
 }
 
 func TestVirtualStreamRequestRejectsTraversalAndMalformedEpisodes(t *testing.T) {

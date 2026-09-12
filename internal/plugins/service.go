@@ -105,11 +105,14 @@ type Service struct {
 	virtualVariantsMu    sync.Mutex
 	virtualVariantsCache map[string]virtualVariantsCacheEntry
 
-	// resolvedURLsMu guards a very short-lived memo of provider URLs resolved
+	// resolvedURLsMu guards a short-lived memo of provider URLs resolved
 	// during playback start. The same virtual URI is resolved once for probing
 	// and again when the transport opens; this memo bridges that gap so the
-	// provider is not contacted twice per playback start. Entries live for
-	// seconds, never longer — provider URLs rotate and must not be cached.
+	// provider is not contacted twice per playback start. Entries are fresh for
+	// resolvedURLMemoTTL and may be served stale for a further
+	// resolvedURLMemoStaleGrace while a background refresh replaces them, so a
+	// playback start that races a URL rotation is not forced into a synchronous
+	// provider fetch.
 	resolvedURLsMu        sync.Mutex
 	resolvedURLs          map[string]resolvedURLEntry
 	resolvedURLsNextSweep time.Time
@@ -130,6 +133,14 @@ type resolvedURLEntry struct {
 	// Chains are capped so a memo only stays warm for an active playback
 	// startup window instead of living for the lifetime of the process.
 	refreshes int
+	// refreshFailed records a definitive provider failure on the last
+	// background refresh (error or empty URL). A stale entry with this set is
+	// dropped instead of served: extending it would pin a URL the provider has
+	// already refused to renew.
+	refreshFailed bool
+	// refreshInFlight marks a background refresh kicked by a stale lookup so
+	// concurrent callers join it instead of stampeding the provider.
+	refreshInFlight bool
 }
 
 // SetEventDispatcher wires the EventDispatcher into the Service. The
