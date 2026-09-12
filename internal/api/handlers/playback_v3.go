@@ -1672,6 +1672,12 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 			var firstFailureFile *models.MediaFile
 			var firstFailureReq playback.StartRequestV3
 			firstFailureAudioIndex := 0
+			// A candidate that cannot honor the subtitle selection is held as a
+			// last-resort degrade and only used after every candidate has been
+			// tried, so an explicit pick still hunts for a version that has it.
+			var subtitleMissFile *models.MediaFile
+			var subtitleMissReq playback.StartRequestV3
+			subtitleMissAudioIndex := 0
 			// A tone-map capability failure is server-wide, not per-candidate:
 			// every sibling would plan to the same verdict, so paying a
 			// resolve+probe+plan round-trip per file only delays the start the
@@ -1691,6 +1697,11 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 				var candidateToneMapErr error
 				if err := h.remapSubtitleSelectionV3(r.Context(), requestedFile, candidateFile, &candidateReq); err != nil {
 					candidateResult = playback.PlannerResultV3{Terminal: &playback.TerminalV3{Reason: terminalSubtitleUnavailableInVersionV3, Message: err.Error(), Retryable: false}}
+					if errors.Is(err, errSubtitleUnavailableInTargetV3) && subtitleMissFile == nil {
+						subtitleMissFile = candidateFile
+						subtitleMissReq = candidateReq
+						subtitleMissAudioIndex = candidateAudioIndex
+					}
 				} else {
 					if err := preflightPlaybackFile(r.Context(), candidateFile, h.MissingMarker, h.EventsHub); err != nil {
 						continue
@@ -1727,6 +1738,33 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 				audioIndex = firstFailureAudioIndex
 				result = firstFailureResult
 				toneMapCapabilityErr = firstFailureToneMapErr
+			}
+			if result.Terminal != nil && subtitleMissFile != nil {
+				// Every alternate that could honor the subtitle selection has
+				// been exhausted. Playability wins over fidelity: continue on
+				// the first candidate that lacked the track with subtitles off
+				// instead of terminalling the start.
+				degradeReq := subtitleMissReq
+				degradeReq.SubtitleTrackIndex = nil
+				degradeReq.SubtitleTrackID = ""
+				if preflightErr := preflightPlaybackFile(r.Context(), subtitleMissFile, h.MissingMarker, h.EventsHub); preflightErr == nil {
+					degradeResult, degradeToneMapErr := h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{
+						Request: degradeReq, RequestedFile: requestedFile, EffectiveFile: subtitleMissFile,
+						AudioTrackIndex: subtitleMissAudioIndex, Settings: settings,
+						Registry: h.transformationRegistryV3(r.Context()), DVRPUStrippable: h.lazyDVRPUStrippableV3(r.Context(), subtitleMissFile), Now: time.Now(),
+						AdditionalSubtitles: h.downloadedSubtitleInventoryV3(r.Context(), subtitleMissFile),
+					})
+					clampPlannerTargetResolution(&degradeResult, subtitleMissFile)
+					if degradeResult.Terminal == nil {
+						slog.InfoContext(r.Context(), "subtitle unavailable in every alternate; continuing with subtitles off",
+							logComponentKey, playbackLogValueV3, "alternate_file_id", subtitleMissFile.ID)
+						req = degradeReq
+						effectiveFile = subtitleMissFile
+						audioIndex = subtitleMissAudioIndex
+						result = degradeResult
+						toneMapCapabilityErr = degradeToneMapErr
+					}
+				}
 			}
 		}
 	}
@@ -1789,7 +1827,15 @@ func (h *PlaybackHandler) handleStartPlaybackV3(w http.ResponseWriter, r *http.R
 					}
 					alternateAudio := remapAudioIndexV3(effectiveFile, alternate, audioIndex)
 					alternateRequest := req
-					if subtitleErr := h.remapSubtitleSelectionV3(r.Context(), effectiveFile, alternate, &alternateRequest); subtitleErr == nil {
+					subtitleErr := h.remapSubtitleSelectionV3(r.Context(), effectiveFile, alternate, &alternateRequest)
+					if errors.Is(subtitleErr, errSubtitleUnavailableInTargetV3) {
+						// The alternate has no equivalent track; degrade rather
+						// than give up on a playable route.
+						alternateRequest.SubtitleTrackIndex = nil
+						alternateRequest.SubtitleTrackID = ""
+						subtitleErr = nil
+					}
+					if subtitleErr == nil {
 						alternateResult, _ := h.planPlaybackWithCapabilitiesV3(r.Context(), playback.PlannerInputV3{
 							Request: alternateRequest, RequestedFile: requestedFile, EffectiveFile: alternate,
 							AudioTrackIndex: alternateAudio, Settings: settings,
@@ -5019,6 +5065,31 @@ func (h *PlaybackHandler) evaluateReplanCandidateV3(
 	}, nil
 }
 
+// evaluateSubtitleDegradedCandidateV3 re-evaluates a candidate alternate with
+// the subtitle selection cleared, so a version that has no equivalent track
+// still yields a playable subtitles-off plan. Callers run it only after every
+// candidate that can honor the selection has been tried: an explicit user pick
+// keeps its hunt for a matching version, while a stale selection degrades
+// instead of terminalling playback.
+func (h *PlaybackHandler) evaluateSubtitleDegradedCandidateV3(
+	r *http.Request,
+	session *playback.Session,
+	record *playback.AttemptRecordV3,
+	req playback.ReplanRequestV3,
+	baseStart playback.StartRequestV3,
+	sourceFile *models.MediaFile,
+	candidateAlternate *models.MediaFile,
+	plannerRequestedFile *models.MediaFile,
+	plannerSettings playback.PlannerSettingsV3,
+	plannerSettingsErr error,
+	attemptedKeys []string,
+) (*candidateEvaluationV3, *candidateErrorV3) {
+	degradedStart := baseStart
+	degradedStart.SubtitleTrackIndex = nil
+	degradedStart.SubtitleTrackID = ""
+	return h.evaluateReplanCandidateV3(r, session, record, req, degradedStart, sourceFile, candidateAlternate, plannerRequestedFile, plannerSettings, plannerSettingsErr, attemptedKeys)
+}
+
 // executeReplanV3 prepares an atomic replacement for a failed playback route.
 func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.AttemptRecordV3, req playback.ReplanRequestV3) (playback.DecisionResponseV3, playback.AttemptRecordV3, *preparedTransportV3, *transportErrorV3) {
 	r = r.WithContext(withPlaybackRoutingPolicySnapshotV3(r.Context(), h.playbackRoutingPolicyV3()))
@@ -5304,6 +5375,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 
 		var candidateErrs []*candidateErrorV3
 		virtualRecoverySucceeded := false
+		var subtitleMissAlternate *models.MediaFile
 		for _, alternate := range alternates {
 			if alternate.ID == failedEffectiveFile.ID {
 				continue
@@ -5311,6 +5383,9 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 			eval, err := h.evaluateReplanCandidateV3(r, session, record, req, start, failedEffectiveFile, alternate, plannerRequestedFile, plannerSettings, plannerSettingsErr, attemptedKeys)
 			if err != nil {
 				candidateErrs = append(candidateErrs, err)
+				if errors.Is(err, errSubtitleUnavailableInTargetV3) && subtitleMissAlternate == nil {
+					subtitleMissAlternate = alternate
+				}
 				slog.WarnContext(r.Context(), "virtual replan candidate alternate failed",
 					"component", "api", "session_id", record.SessionID,
 					"requested_file_id", record.RequestedMediaFileID, "failed_file_id", failedEffectiveFile.ID,
@@ -5328,6 +5403,21 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 				reservationHeld = eval.reservationHeld
 				virtualRecoverySucceeded = true
 				break
+			}
+		}
+		if !virtualRecoverySucceeded && subtitleMissAlternate != nil {
+			// No candidate had an equivalent track. Degrade the first such
+			// candidate to subtitles-off rather than terminalling playback.
+			if eval, evalErr := h.evaluateSubtitleDegradedCandidateV3(r, session, record, req, start, failedEffectiveFile, subtitleMissAlternate, plannerRequestedFile, plannerSettings, plannerSettingsErr, attemptedKeys); evalErr == nil && eval != nil && eval.result.Terminal == nil {
+				start = eval.start
+				effectiveFile = eval.file
+				result = eval.result
+				toneMapCapabilityErr = eval.toneMapErr
+				artifactRecipe = eval.frozenRecipe
+				preparedTransport = &eval.transport
+				transportPrepared = true
+				reservationHeld = eval.reservationHeld
+				virtualRecoverySucceeded = true
 			}
 		}
 		if !virtualRecoverySucceeded {
@@ -5361,6 +5451,12 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 					// but it must not retire a healthy active alternate merely because
 					// the viewer selected a track unique to that alternate.
 					effectiveFile = currentEffectiveFile
+				} else if errors.Is(remapErr, errSubtitleUnavailableInTargetV3) {
+					// The target edition has no equivalent track. Playability wins:
+					// plan it with subtitles off instead of terminalling.
+					candidateStart.SubtitleTrackIndex = nil
+					candidateStart.SubtitleTrackID = ""
+					start = candidateStart
 				} else if remapErr != nil {
 					return playback.DecisionResponseV3{}, *record, nil, &transportErrorV3{reason: "track_unavailable", message: remapErr.Error()}
 				} else {
@@ -5471,6 +5567,7 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 				baseStart := start
 				baseEffectiveFile := effectiveFile
 				var firstFailureEval *candidateEvaluationV3
+				var subtitleMissAlternate *models.MediaFile
 				// A terminal that names a server-wide condition (no tone-map
 				// recipe, transcoding disabled) is not per-candidate: every
 				// remaining sibling would plan to the same verdict, so paying
@@ -5491,6 +5588,9 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 							"requested_file_id", record.RequestedMediaFileID, "base_file_id", baseEffectiveFile.ID,
 							"candidate_file_id", alternate.ID, "error", logredact.SanitizeURLError(err),
 						)
+						if errors.Is(err, errSubtitleUnavailableInTargetV3) && subtitleMissAlternate == nil {
+							subtitleMissAlternate = alternate
+						}
 						// A planner terminal of transcode_start_failed here is
 						// the tone-map discovery retry: it is a server-wide
 						// capability condition, so later candidates cannot
@@ -5512,6 +5612,21 @@ func (h *PlaybackHandler) executeReplanV3(r *http.Request, record *playback.Atte
 					}
 					if firstFailureEval == nil && eval != nil {
 						firstFailureEval = eval
+					}
+				}
+				if result.Terminal != nil && subtitleMissAlternate != nil {
+					// Every candidate with an equivalent track is exhausted.
+					// Degrade to subtitles-off rather than terminalling, but only
+					// after the honoring candidates above have all been tried.
+					if eval, evalErr := h.evaluateSubtitleDegradedCandidateV3(r, session, record, req, baseStart, baseEffectiveFile, subtitleMissAlternate, plannerRequestedFile, plannerSettings, plannerSettingsErr, attemptedKeys); evalErr == nil && eval != nil && eval.result.Terminal == nil {
+						start = eval.start
+						effectiveFile = eval.file
+						result = eval.result
+						toneMapCapabilityErr = eval.toneMapErr
+						artifactRecipe = eval.frozenRecipe
+						preparedTransport = &eval.transport
+						transportPrepared = true
+						reservationHeld = eval.reservationHeld
 					}
 				}
 				if result.Terminal != nil && firstFailureEval != nil {
@@ -6771,6 +6886,14 @@ func (h *PlaybackHandler) resolveCarriedAudioTrackV3(ctx context.Context, carrie
 	return playback.MatchAudioTrackAcrossVersions(source.AudioTracks, target.AudioTracks, ordinal), true
 }
 
+// errSubtitleUnavailableInTargetV3 reports that the target media file has no
+// equivalent of the selected subtitle track. It is deliberately non-terminal:
+// a caller iterating candidates keeps hunting for one that honors the
+// selection and only degrades to subtitles-off once every candidate has been
+// tried, so a stale carried selection never terminates playback. Malformed
+// subtitle identities use a plain error and still terminate.
+var errSubtitleUnavailableInTargetV3 = errors.New("no equivalent subtitle track in the target file version")
+
 func (h *PlaybackHandler) remapSubtitleSelectionV3(ctx context.Context, source, target *models.MediaFile, request *playback.StartRequestV3) error {
 	if request == nil || source == nil || target == nil || source.ID == target.ID {
 		return nil
@@ -6868,17 +6991,16 @@ func (h *PlaybackHandler) remapSubtitleSelectionV3(ctx context.Context, source, 
 		}
 	}
 	if targetIndex < 0 {
-		// No equivalent track exists on the target version. A stale/carried
-		// identity must not hard-fail the version switch: clear the selection so
-		// the target plans with subtitles off and the viewer can re-pick. An
-		// out-of-range index is never handed to the subtitle policy, which would
-		// otherwise have to re-derive the same downgrade.
-		slog.InfoContext(ctx, "carried subtitle selection out of range for effective file; subtitles disabled",
+		// No equivalent track exists on the target version. Preserve the
+		// selection and report a non-terminal miss: a caller iterating
+		// candidates keeps hunting for one that can honor it, and only degrades
+		// to subtitles-off once every candidate has been tried. Clearing the
+		// selection here would accept the first candidate that cannot honor an
+		// explicit user choice even when a later version can.
+		slog.InfoContext(ctx, "no equivalent subtitle track in effective file; trying other candidates",
 			"component", "playback", "source_file_id", source.ID, "target_file_id", target.ID,
 			"subtitle_track_index", index)
-		request.SubtitleTrackIndex = nil
-		request.SubtitleTrackID = ""
-		return nil
+		return errSubtitleUnavailableInTargetV3
 	}
 	request.SubtitleTrackIndex = &targetIndex
 	request.SubtitleTrackID = playback.TrackIDV3(target.ID, "subtitle", targetIndex)

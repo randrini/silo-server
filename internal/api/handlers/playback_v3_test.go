@@ -4140,10 +4140,13 @@ func TestRemapSubtitleSelectionV3RejectsNegativeIndex(t *testing.T) {
 }
 
 // The identity remap covers a carried selection by language/format. When it
-// cannot find a counterpart, it must clear the selection rather than terminal
-// the version switch: the prod failure was a carried ordinal (20+) resumed onto
-// a 3-track edition, where nothing matches and the whole start hard-failed.
-func TestRemapSubtitleSelectionV3MissDegradesToOff(t *testing.T) {
+// cannot find a counterpart it reports a non-terminal miss and leaves the
+// selection in place, so the handler can keep hunting among the other
+// candidates for one that honors it and degrade to subtitles-off only after
+// all of them have been tried. The prod failure was a carried ordinal (20+)
+// resumed onto a 3-track edition, where nothing matches; the handler's degrade
+// path keeps playback alive instead of hard-failing the start.
+func TestRemapSubtitleSelectionV3MissSignalsDegrade(t *testing.T) {
 	source := &models.MediaFile{ID: 1, SubtitleTracks: []models.SubtitleTrack{{Language: "eng", Codec: "subrip"}}}
 	target := &models.MediaFile{ID: 2, SubtitleTracks: []models.SubtitleTrack{{Language: "fra", Codec: "subrip"}}}
 	request := playback.StartRequestV3{
@@ -4151,11 +4154,11 @@ func TestRemapSubtitleSelectionV3MissDegradesToOff(t *testing.T) {
 		SubtitleTrackID:    playback.TrackIDV3(source.ID, "subtitle", 0),
 	}
 	handler := &PlaybackHandler{}
-	if err := handler.remapSubtitleSelectionV3(context.Background(), source, target, &request); err != nil {
-		t.Fatalf("remap miss must degrade, not error: %v", err)
+	if err := handler.remapSubtitleSelectionV3(context.Background(), source, target, &request); !errors.Is(err, errSubtitleUnavailableInTargetV3) {
+		t.Fatalf("remap miss err = %v, want errSubtitleUnavailableInTargetV3", err)
 	}
-	if request.SubtitleTrackIndex != nil || request.SubtitleTrackID != "" {
-		t.Fatalf("remap miss left a selection: index=%v id=%q", request.SubtitleTrackIndex, request.SubtitleTrackID)
+	if request.SubtitleTrackIndex == nil || *request.SubtitleTrackIndex != 0 || request.SubtitleTrackID == "" {
+		t.Fatalf("remap miss must preserve the selection for the caller: index=%v id=%q", request.SubtitleTrackIndex, request.SubtitleTrackID)
 	}
 }
 
@@ -4362,22 +4365,29 @@ func TestHandleReplanPlaybackV3PreservesOmittedSubtitleAndReportsUnavailableInFa
 		PlanAttemptID: "subtitle-version-attempt-0001", PlanAttemptKey: currentKey,
 		AttemptedPlanKeys: []string{currentKey}, AttemptCount: 1, QualityPreference: "1080p",
 		// A non-track-change replan may omit an unchanged subtitle identity.
-		// The server must preserve it, then fail explicitly because the 1080p
-		// fallback has no equivalent track. Clearing it would incorrectly make
-		// the alternate version playable with subtitles off.
+		// The server carries it onto the 1080p fallback. That fallback has no
+		// equivalent track, and after every candidate has been tried the
+		// carried selection degrades to subtitles-off rather than terminalling
+		// playback: the session must still open even without the subtitle.
 		SelectedTracks:        playback.SelectedTracksV3{Audio: started.PlaybackPlan.SelectedTracks.Audio},
 		Capabilities:          startRequest.Capabilities,
 		ClientPlaybackContext: startRequest.ClientPlaybackContext,
 	})
-	if response.Terminal == nil || response.Terminal.Reason != "subtitle_unavailable_in_version" || response.Terminal.Retryable {
+	if response.Terminal != nil || response.PlaybackPlan == nil {
 		t.Fatalf("fallback terminal = %#v, plan = %#v", response.Terminal, response.PlaybackPlan)
+	}
+	if response.PlaybackPlan.EffectiveMediaFileID != alternate.ID {
+		t.Fatalf("fallback effective file = %d, want %d", response.PlaybackPlan.EffectiveMediaFileID, alternate.ID)
+	}
+	if response.PlaybackPlan.Subtitle.Mode != playback.SubtitleOffV3 || response.PlaybackPlan.SelectedTracks.Subtitle != nil {
+		t.Fatalf("fallback subtitles = %#v / %#v, want off with no selection", response.PlaybackPlan.Subtitle, response.PlaybackPlan.SelectedTracks.Subtitle)
 	}
 	record, err := handler.PlanStoreV3.GetAttempt(context.Background(), started.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.NormalizedRequest.SubtitleTrackID != startRequest.SubtitleTrackID || record.CurrentPlan.SelectedTracks.Subtitle == nil {
-		t.Fatalf("terminal fallback changed durable subtitle selection: %#v", record)
+	if record.NormalizedRequest.SubtitleTrackID != "" || record.NormalizedRequest.SubtitleTrackIndex != nil {
+		t.Fatalf("degraded fallback kept the durable subtitle selection: %#v", record.NormalizedRequest)
 	}
 }
 
