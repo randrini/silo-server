@@ -8,6 +8,7 @@ import { usePlayerConfig } from "../context/PlayerConfigContext";
 import { playerFetch } from "../player-fetch";
 import { resolvePlayableSubtitles } from "../utils/playableSubtitles";
 import { patchVersionMarkers, resolveActiveVersionMarkers } from "../utils/watchPageMarkers";
+import { resolveEffectiveVersion } from "../utils/resolveEffectiveVersion";
 import { buildSubtitleChoiceRequests } from "../utils/subtitleChoicePersistence";
 import { VideoPlayer } from "./VideoPlayer";
 import { fetchWatchDetail } from "@/hooks/queries/items";
@@ -617,8 +618,7 @@ export function WatchPage({
     session.durationSeconds ??
     playbackVersions.find((v) => v.file_id === session.mediaFileId)?.duration ??
     playbackVersions[0]?.duration;
-  const selectedVersion =
-    playbackVersions.find((v) => v.file_id === session.mediaFileId) ?? playbackVersions[0];
+  const selectedVersion = resolveEffectiveVersion(playbackVersions, session) ?? playbackVersions[0];
   const activeChapters =
     (playbackVersions.find((v) => v.file_id === session.mediaFileId) ?? selectedVersion)
       ?.chapters ?? [];

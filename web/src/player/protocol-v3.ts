@@ -594,6 +594,14 @@ export interface PlanV3 {
   decision_reason: string;
   requested_media_file_id: number;
   effective_media_file_id: number;
+  /**
+   * The file path of the concrete candidate the server resolved a neutral
+   * `virtual://…` requested row to, when the effective source is virtual.
+   * Absent for an ordinary file, where `effective_media_file_id` already names
+   * the source. The collapsed id cannot be matched against catalog version
+   * rows, so clients use this path to adopt the version actually playing.
+   */
+  effective_virtual_uri?: string;
   source: SourceDescriptorV3;
   subtitle_fidelity_policy: string;
   /**

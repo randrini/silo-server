@@ -2671,6 +2671,75 @@ describe("usePlaybackSession plan audio inventory", () => {
   });
 });
 
+describe("usePlaybackSession effective virtual source", () => {
+  it("exposes the plan's effective_virtual_uri on adoption", async () => {
+    const effectiveVirtualUri = "/media/Movies/Example (2024)/Example.1080p.mkv";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3({
+              effective_media_file_id: 100,
+              effective_virtual_uri: effectiveVirtualUri,
+            }),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan).not.toBeNull());
+    // The collapsed id still names the requested frame; the path names the
+    // concrete candidate the menus should adopt. It is menu data only.
+    expect(result.current.mediaFileId).toBe(100);
+    expect(result.current.effectiveVirtualUri).toBe(effectiveVirtualUri);
+    unmount();
+  });
+
+  it("defaults effectiveVirtualUri to null when the plan omits it", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/playback/start")) {
+        return jsonResponse(
+          {
+            protocol_version: 3,
+            server_features: ["playback_plan_v3"],
+            outcome: "playable",
+            session_id: "session-1",
+            playback_plan: fixturePlanV3(),
+          },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/playback/route-events")) return new Response(null, { status: 202 });
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, unmount } = renderHook(
+      () => usePlaybackSession("request-1", [], [], 7, 0, false, "auto"),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.plan).not.toBeNull());
+    expect(result.current.effectiveVirtualUri).toBeNull();
+    unmount();
+  });
+});
+
 describe("usePlaybackSession retryable terminals", () => {
   it("retries the same file with force_relink and coalesces a double-tap", async () => {
     const startBodies: Array<Record<string, unknown>> = [];

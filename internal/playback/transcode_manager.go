@@ -72,6 +72,10 @@ type TranscodeManager struct {
 	// reconstructed under the same id between the exit and teardown is not killed.
 	// No-op when nil.
 	OnFFmpegCrash func(ctx context.Context, sessionID string, dead *TranscodeSession)
+	// OnDemuxFailure is forwarded into every local transcode this manager starts
+	// or reconstructs so repeated input demux failures can stamp the source
+	// candidate known-bad. No-op when nil.
+	OnDemuxFailure func(ctx context.Context, mediaFileID int, canonicalPath string) error
 	// StartThrottler optionally starts the segment throttler for a (re)started
 	// transcode, reading the embedding handler's settings. No-op when nil.
 	StartThrottler func(ctx context.Context, ts *TranscodeSession)
@@ -875,6 +879,7 @@ func (m *TranscodeManager) doReconstructTranscode(ctx context.Context, sessionID
 	// not a fresh generation: restore the conservative manifest lead so recovery
 	// never exposes a hardware encoder after only one fragment.
 	opts.FastStart = false
+	opts.OnDemuxFailure = m.OnDemuxFailure
 
 	if m.ResolveInput != nil {
 		resolved, cleanup, err := m.ResolveInput(ctx, card.MediaFileID, card.VirtualSourceOwnerInstallationID, card.UserID, card.ProfileID, opts.InputPath)

@@ -1072,6 +1072,23 @@ func resolvedPlaybackAudioLanguage(ctx context.Context, store userstore.UserStor
 
 // --- Persistence helpers ---
 
+// progressPersistenceFile resolves which media_files row progress and version
+// hints should record. A virtual session binds VirtualSourceURI to the exact
+// candidate selected and probed at plan time; that candidate is a different
+// catalog row from the neutral requested row, so preferring the requested row
+// leaves last_file_id pointing at the neutral VIRTUAL version and the media
+// page never adopts the version that actually played. Fall back to the
+// requested/effective session IDs when the candidate row cannot be resolved
+// (for example it was replaced between resolve and persist).
+func (h *PlaybackHandler) progressPersistenceFile(ctx context.Context, session *playback.Session) (*models.MediaFile, error) {
+	if session != nil && session.VirtualSourceURI != "" && h.VirtualFileLookup != nil {
+		if file, err := h.VirtualFileLookup(ctx, session.VirtualSourceURI); err == nil && file != nil && file.ID > 0 {
+			return file, nil
+		}
+	}
+	return h.loadFileByPreferredID(ctx, requestedMediaFileID(session), session.MediaFileID)
+}
+
 // persistProgress saves the current playback position to the UserStore.
 // It resolves the mediaFileID to a mediaItemID via the file resolver.
 // Errors are logged but do not fail the HTTP request.
@@ -1090,7 +1107,7 @@ func (h *PlaybackHandler) persistProgress(ctx context.Context, session *playback
 		return
 	}
 
-	file, err := h.loadFileByPreferredID(ctx, requestedMediaFileID(session), session.MediaFileID)
+	file, err := h.progressPersistenceFile(ctx, session)
 	targetID := playbackProgressTarget(file)
 	if err != nil || targetID == "" {
 		return // file not found or not yet matched to a media item
@@ -1131,7 +1148,7 @@ func (h *PlaybackHandler) persistStopAndHistory(ctx context.Context, session *pl
 		return watchstate.PlaybackStopResult{}
 	}
 
-	file, err := h.loadFileByPreferredID(ctx, requestedMediaFileID(session), session.MediaFileID)
+	file, err := h.progressPersistenceFile(ctx, session)
 	targetID := playbackProgressTarget(file)
 	if err != nil || targetID == "" {
 		return watchstate.PlaybackStopResult{}

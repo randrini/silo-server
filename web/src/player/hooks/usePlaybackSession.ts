@@ -61,6 +61,14 @@ interface PlaybackSessionState {
   sessionId: string | null;
   playbackAttemptId: string | null;
   mediaFileId: number | null;
+  /**
+   * The file path of the concrete candidate the server resolved a neutral
+   * `virtual://…` requested row to, when the effective source is virtual. Null
+   * for an ordinary file or an older plan that does not publish it. This is
+   * menu data only: adopting it must never reload the stream, so it does not
+   * touch `planRevision`/`transportRevision`.
+   */
+  effectiveVirtualUri: string | null;
   initialPosition: number;
   audioTrackIndex: number;
   durationSeconds: number | null;
@@ -263,6 +271,7 @@ function planToSessionState(
     sessionId,
     playbackAttemptId,
     mediaFileId: plan.effective_media_file_id,
+    effectiveVirtualUri: plan.effective_virtual_uri ?? null,
     initialPosition: plan.timeline.player_start_seconds,
     audioTrackIndex: plan.selected_tracks.audio?.index ?? 0,
     durationSeconds: plan.source.duration_seconds ?? null,
@@ -377,6 +386,7 @@ export function usePlaybackSession(
     sessionId: null,
     playbackAttemptId: null,
     mediaFileId: null,
+    effectiveVirtualUri: null,
     initialPosition: 0,
     audioTrackIndex: 0,
     durationSeconds: null,
@@ -706,6 +716,7 @@ export function usePlaybackSession(
           streamUrl: null,
           sessionId: null,
           mediaFileId: null,
+          effectiveVirtualUri: null,
           initialPosition: 0,
           audioTrackIndex: 0,
           durationSeconds: null,
@@ -824,6 +835,7 @@ export function usePlaybackSession(
           sessionId: null,
           playbackAttemptId,
           mediaFileId: null,
+          effectiveVirtualUri: null,
           initialPosition: 0,
           audioTrackIndex: 0,
           durationSeconds: null,

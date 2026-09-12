@@ -94,6 +94,144 @@ func TestReplaceVirtualCandidatesIsScopedToLibrary(t *testing.T) {
 	}
 }
 
+// TestReplaceVirtualCandidatesRetainsLastPlayed covers the retention rule in
+// ReplaceVirtualCandidates: provider re-lists churn result ids, so a stale
+// candidate that is some user's user_watch_progress.last_file_id must survive,
+// an unplayed stale candidate must still be deleted, and a retained row that is
+// re-listed with the same URI must be updated in place rather than duplicated.
+func TestReplaceVirtualCandidatesRetainsLastPlayed(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	contentID := fmt.Sprintf("virtual-retain-last-played-%d", suffix)
+	basePath := fmt.Sprintf("virtual://movie/tt%d?profile=1080p", suffix)
+	playedPath := basePath + "&result=played"
+	unplayedPath := basePath + "&result=unplayed"
+	relistedPath := basePath + "&result=relisted"
+
+	var folderID, userID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_folders(type,name,enabled)
+		VALUES('movies',$1,true) RETURNING id`, fmt.Sprintf("Retain Last Played %d", suffix)).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO users(username, role) VALUES($1,'user') RETURNING id`,
+		fmt.Sprintf("retain-last-played-%d", suffix)).Scan(&userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM user_watch_progress WHERE user_id=$1`, userID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_item_libraries WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id=$1`, folderID)
+		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_items(content_id,type,title,status,genres)
+		VALUES($1,'movie','Retain Last Played','matched','{}'::text[])`, contentID); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_item_libraries(content_id,media_folder_id)
+		VALUES($1,$2)`, contentID, folderID); err != nil {
+		t.Fatalf("seed item library: %v", err)
+	}
+
+	seed := func(path string, failed bool) int {
+		var failedAt *time.Time
+		if failed {
+			now := time.Now()
+			failedAt = &now
+		}
+		var id int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files(content_id,media_folder_id,file_path,file_size,container,virtual_owner_installation_id,failed_at)
+			VALUES($1,$2,$3,0,'mkv',5,$4) RETURNING id`,
+			contentID, folderID, path, failedAt).Scan(&id); err != nil {
+			t.Fatalf("seed virtual file %q: %v", path, err)
+		}
+		return id
+	}
+	playedID := seed(playedPath, false)
+	_ = seed(unplayedPath, false)
+	// The re-listed row is seeded failed to prove a fresh listing clears it.
+	relistedID := seed(relistedPath, true)
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_watch_progress(user_id, profile_id, media_item_id, position_seconds, duration_seconds, last_file_id)
+		VALUES($1,'default',$2,100,7200,$3)`, userID, contentID, playedID); err != nil {
+		t.Fatalf("seed watch progress: %v", err)
+	}
+
+	repo := NewFileRepository(pool)
+	source := &models.MediaFile{
+		ContentID:                  contentID,
+		MediaFolderID:              folderID,
+		FilePath:                   basePath,
+		VirtualOwnerInstallationID: 5,
+	}
+	// The re-list drops played and unplayed; only relisted is offered again.
+	if err := repo.ReplaceVirtualCandidates(ctx, source, []VirtualCandidate{{URI: relistedPath, Label: "1080p"}}); err != nil {
+		t.Fatalf("replace virtual candidates: %v", err)
+	}
+
+	var playedCount, unplayedCount, relistedCount, relistedSameID int
+	if err := pool.QueryRow(ctx, `
+		SELECT
+		  count(*) FILTER(WHERE file_path=$2),
+		  count(*) FILTER(WHERE file_path=$3),
+		  count(*) FILTER(WHERE file_path=$4),
+		  count(*) FILTER(WHERE file_path=$4 AND id=$5)
+		FROM media_files
+		WHERE content_id=$1 AND virtual_owner_installation_id=5`,
+		contentID, playedPath, unplayedPath, relistedPath, relistedID,
+	).Scan(&playedCount, &unplayedCount, &relistedCount, &relistedSameID); err != nil {
+		t.Fatalf("inspect retained candidates: %v", err)
+	}
+	if playedCount != 1 {
+		t.Fatalf("last-played stale candidate was deleted: count=%d, want 1", playedCount)
+	}
+	if unplayedCount != 0 {
+		t.Fatalf("unplayed stale candidate survived: count=%d, want 0", unplayedCount)
+	}
+	if relistedCount != 1 || relistedSameID != 1 {
+		t.Fatalf("relisted candidate duplicated or replaced: count=%d sameID=%d, want 1/1", relistedCount, relistedSameID)
+	}
+
+	// The retained last-played row is untouched.
+	var playedPathNow string
+	var playedFailed *time.Time
+	if err := pool.QueryRow(ctx, `SELECT file_path, failed_at FROM media_files WHERE id=$1`, playedID).
+		Scan(&playedPathNow, &playedFailed); err != nil {
+		t.Fatalf("fetch retained played row: %v", err)
+	}
+	if playedPathNow != playedPath || playedFailed != nil {
+		t.Fatalf("retained played row changed: path=%q failed=%v, want %q/NULL", playedPathNow, playedFailed, playedPath)
+	}
+
+	// The re-listed row keeps its id and has failed_at cleared by the re-list.
+	var relistedPathNow string
+	var relistedFailed *time.Time
+	if err := pool.QueryRow(ctx, `SELECT file_path, failed_at FROM media_files WHERE id=$1`, relistedID).
+		Scan(&relistedPathNow, &relistedFailed); err != nil {
+		t.Fatalf("fetch relisted row: %v", err)
+	}
+	if relistedPathNow != relistedPath || relistedFailed != nil {
+		t.Fatalf("relisted row not updated: path=%q failed=%v, want %q/NULL", relistedPathNow, relistedFailed, relistedPath)
+	}
+}
+
 func TestReplaceVirtualCandidatesPreservesBarePlaceholder(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {

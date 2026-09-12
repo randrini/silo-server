@@ -1419,6 +1419,45 @@ describe("VideoPlayer version switch UX", () => {
     expect(props.versions?.find((v) => v.fileId === 7)?.isCurrentSource).toBe(true);
   });
 
+  it("marks the path-matched candidate as Current Source for a resolved virtual row", () => {
+    const virtualRow = {
+      ...versionA,
+      file_id: 100,
+      container: "virtual",
+      file_path: "virtual://movie/tt1?result=all",
+    };
+    const candidateRow = {
+      ...versionA,
+      file_id: 7,
+      file_path: "/media/Movies/Example (2024)/Example.1080p.mkv",
+    };
+    const plan = fixturePlanV3({
+      requested_media_file_id: 100,
+      effective_media_file_id: 100,
+      effective_virtual_uri: candidateRow.file_path,
+    });
+
+    renderPlayer({ plan, versions: [virtualRow, candidateRow], activeFileId: 100 });
+
+    const props = controls.current as unknown as {
+      versions?: Array<{ fileId: number; isCurrentSource: boolean; isRequestedSource: boolean }>;
+    };
+    // The collapsed VIRTUAL id stays in the plan, so only the path match can
+    // light the concrete candidate the server is actually playing.
+    expect(props.versions?.find((v) => v.fileId === 7)?.isCurrentSource).toBe(true);
+    expect(props.versions?.find((v) => v.fileId === 100)?.isCurrentSource).toBe(false);
+  });
+
+  it("leaves the file_id match current when no effective virtual URI is published", () => {
+    renderPlayer({ versions: [versionA, versionB], activeFileId: 7 });
+
+    const props = controls.current as unknown as {
+      versions?: Array<{ fileId: number; isCurrentSource: boolean }>;
+    };
+    expect(props.versions?.find((v) => v.fileId === 7)?.isCurrentSource).toBe(true);
+    expect(props.versions?.find((v) => v.fileId === 99)?.isCurrentSource).toBe(false);
+  });
+
   it("shows the quality ellipsis only for quality replans, not track changes", async () => {
     const { rerenderPlayer } = renderPlayer({});
 

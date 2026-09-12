@@ -38,4 +38,9 @@ var (
 	// means limits could not be evaluated at all, so callers may choose to fail
 	// open rather than treat the session as over its (unknown) cap.
 	ErrLimitProviderUnavailable = errors.New("session limit provider unavailable")
+	// ErrVirtualSourceDemuxFailed reports that a transcode session's source
+	// produced repeated input demux I/O failures and the candidate was stamped
+	// known-bad. A restart must not rebuild the same bad transport; the caller
+	// rotates to another candidate on the next failure recovery.
+	ErrVirtualSourceDemuxFailed = errors.New("virtual source produced repeated demux failures")
 )

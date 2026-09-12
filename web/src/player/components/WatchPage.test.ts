@@ -84,6 +84,7 @@ function playbackSession(
     sessionId: "session-1",
     playbackAttemptId: "attempt-1",
     mediaFileId: 7,
+    effectiveVirtualUri: null,
     initialPosition: 0,
     audioTrackIndex: 0,
     durationSeconds: 3600,
@@ -400,6 +401,44 @@ describe("WatchPage version switch feedback", () => {
         "Playing a different version than selected — the requested version isn't playable on this device.",
       ),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("WatchPage effective virtual version", () => {
+  it("selects the path-matched candidate when the session's id is the VIRTUAL row", () => {
+    const virtualRow: PlayerFileVersion = {
+      ...version,
+      file_id: 100,
+      container: "virtual",
+      file_path: "virtual://movie/tt1?result=all",
+    };
+    const candidateRow: PlayerFileVersion = {
+      ...version,
+      file_id: 7,
+      file_path: "/media/Movies/Example (2024)/Example.1080p.mkv",
+    };
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 100,
+        effectiveVirtualUri: candidateRow.file_path ?? null,
+      }),
+    );
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualRow, candidateRow] }));
+
+    const props = videoPlayerMock.mock.calls[0]?.[0] as { selectedVersion?: PlayerFileVersion };
+    expect(props.selectedVersion?.file_id).toBe(7);
+  });
+
+  it("keeps file_id matching when the plan publishes no effective virtual URI", () => {
+    playbackSessionMock.mockReturnValue(
+      playbackSession({ mediaFileId: 7, effectiveVirtualUri: null }),
+    );
+
+    render(createElement(WatchPage, watchPageProps));
+
+    const props = videoPlayerMock.mock.calls[0]?.[0] as { selectedVersion?: PlayerFileVersion };
+    expect(props.selectedVersion?.file_id).toBe(7);
   });
 });
 

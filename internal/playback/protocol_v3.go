@@ -894,26 +894,32 @@ type PlanV3 struct {
 	// PlanAttemptKey is the server-computed opaque loop-prevention token for
 	// this plan. Clients store the keys of attempted plans and echo them in
 	// attempted_plan_keys on replan; they never compute keys themselves.
-	PlanAttemptKey         string                 `json:"plan_attempt_key"`
-	SessionID              string                 `json:"session_id,omitempty"`
-	ExpiresAt              string                 `json:"expires_at,omitempty"`
-	Delivery               DeliveryV3             `json:"delivery"`
-	Stream                 StreamV3               `json:"stream"`
-	Timeline               TimelineV3             `json:"timeline"`
-	SelectedTracks         SelectedTracksV3       `json:"selected_tracks"`
-	EffectiveRecipe        EffectiveRecipeV3      `json:"effective_recipe"`
-	Claims                 ValidationClaimsV3     `json:"claims"`
-	Subtitle               SubtitleDecisionV3     `json:"subtitle"`
-	Transformations        []TransformationV3     `json:"transformations"`
-	AppliedQuirks          []AppliedQuirkV3       `json:"applied_quirks"`
-	RuntimeCorrections     []string               `json:"runtime_corrections"`
-	AvailableQualities     []AvailableQualityV3   `json:"available_qualities"`
-	DegradationWarnings    []DegradationWarningV3 `json:"degradation_warnings"`
-	DecisionReason         string                 `json:"decision_reason"`
-	RequestedMediaFileID   int                    `json:"requested_media_file_id"`
-	EffectiveMediaFileID   int                    `json:"effective_media_file_id"`
-	Source                 SourceDescriptorV3     `json:"source"`
-	SubtitleFidelityPolicy string                 `json:"subtitle_fidelity_policy"`
+	PlanAttemptKey       string                 `json:"plan_attempt_key"`
+	SessionID            string                 `json:"session_id,omitempty"`
+	ExpiresAt            string                 `json:"expires_at,omitempty"`
+	Delivery             DeliveryV3             `json:"delivery"`
+	Stream               StreamV3               `json:"stream"`
+	Timeline             TimelineV3             `json:"timeline"`
+	SelectedTracks       SelectedTracksV3       `json:"selected_tracks"`
+	EffectiveRecipe      EffectiveRecipeV3      `json:"effective_recipe"`
+	Claims               ValidationClaimsV3     `json:"claims"`
+	Subtitle             SubtitleDecisionV3     `json:"subtitle"`
+	Transformations      []TransformationV3     `json:"transformations"`
+	AppliedQuirks        []AppliedQuirkV3       `json:"applied_quirks"`
+	RuntimeCorrections   []string               `json:"runtime_corrections"`
+	AvailableQualities   []AvailableQualityV3   `json:"available_qualities"`
+	DegradationWarnings  []DegradationWarningV3 `json:"degradation_warnings"`
+	DecisionReason       string                 `json:"decision_reason"`
+	RequestedMediaFileID int                    `json:"requested_media_file_id"`
+	EffectiveMediaFileID int                    `json:"effective_media_file_id"`
+	// EffectiveVirtualURI is the provider-neutral virtual:// candidate URI the
+	// planner selected and probed when it substituted a real candidate for a
+	// neutral catalog row. UI-only: clients use it to keep the version menu in
+	// sync with the version that actually played. It is deliberately excluded
+	// from plan identity hashing, like the inventory fields above.
+	EffectiveVirtualURI    string             `json:"effective_virtual_uri,omitempty"`
+	Source                 SourceDescriptorV3 `json:"source"`
+	SubtitleFidelityPolicy string             `json:"subtitle_fidelity_policy"`
 	// AudioTracks is the authoritative per-track audio inventory of the
 	// effective source, mirroring the subtitle inventory. Clients should
 	// prefer it over item metadata: after a version fallback the effective

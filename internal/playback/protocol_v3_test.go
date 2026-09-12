@@ -3696,3 +3696,38 @@ func TestPlanPlaybackV3AudioInventoryComesFromTheEffectiveFile(t *testing.T) {
 		}
 	}
 }
+
+// effective_virtual_uri is a UI-only plan field: it must survive a protocol
+// round trip when set and disappear under omitempty when the effective source
+// is not a virtual candidate.
+func TestPlanV3EffectiveVirtualURIRoundTrip(t *testing.T) {
+	plan := PlanV3{ProtocolVersion: ProtocolV3, RequestedMediaFileID: 41, EffectiveMediaFileID: 42, EffectiveVirtualURI: "virtual://movie/tt1234567?result=working"}
+
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if _, ok := raw["effective_virtual_uri"]; !ok {
+		t.Fatalf("effective_virtual_uri missing from %s", encoded)
+	}
+	var decoded PlanV3
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.EffectiveVirtualURI != plan.EffectiveVirtualURI {
+		t.Fatalf("decoded URI = %q, want %q", decoded.EffectiveVirtualURI, plan.EffectiveVirtualURI)
+	}
+
+	empty := PlanV3{ProtocolVersion: ProtocolV3, RequestedMediaFileID: 41, EffectiveMediaFileID: 42}
+	encodedEmpty, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	if bytes.Contains(encodedEmpty, []byte("effective_virtual_uri")) {
+		t.Fatalf("empty plan serialized effective_virtual_uri: %s", encodedEmpty)
+	}
+}

@@ -53,6 +53,12 @@ func (h *PlaybackHandler) startTranscodeSession(ctx context.Context, opts playba
 }
 
 func (h *PlaybackHandler) startLocalPlaybackTransportOnce(ctx context.Context, opts playback.TranscodeOpts) (*playback.TranscodeSession, error) {
+	// Repeated input demux failures stamp the virtual candidate known-bad; the
+	// manager owns the callback so every local start (fresh or reconstructed)
+	// reaches the same marker without the transcode package importing handlers.
+	if opts.OnDemuxFailure == nil && h.tm != nil {
+		opts.OnDemuxFailure = h.tm.OnDemuxFailure
+	}
 	if !strings.HasPrefix(strings.ToLower(opts.InputPath), virtualPlaybackPrefix) {
 		session, startErr := h.startTranscodeSession(context.WithoutCancel(ctx), opts)
 		if startErr != nil {

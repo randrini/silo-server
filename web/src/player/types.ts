@@ -13,6 +13,12 @@ export type IntroSkipMode = "never" | "ask" | "always";
 export interface PlayerFileVersion {
   file_id: number;
   file_name?: string;
+  /**
+   * The catalog's on-disk path for this version. A virtual requested row is
+   * resolved by the server to a concrete candidate; the plan publishes that
+   * candidate's path as `effective_virtual_uri`, which menus match here.
+   */
+  file_path?: string;
   resolution: string;
   codec_video: string;
   codec_audio: string;

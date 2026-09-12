@@ -49,7 +49,15 @@ type TranscodeOpts struct {
 	// RefreshInput obtains a fresh concrete source before an FFmpeg restart.
 	// Virtual providers may rotate signed URLs while a long session is active.
 	RefreshInput func(context.Context) (resolvedPath string, cleanup func(), err error)
-	OutputDir    string // e.g., /tmp/silo-transcode/{session_id}/
+	// OnDemuxFailure is invoked once per session when FFmpeg reports repeated
+	// input demux ("Error during demuxing") failures, which indicate a bad
+	// source candidate rather than a transient blip. It receives the effective
+	// media_files id and the durable source path so the embedding handler can
+	// stamp the candidate known-bad for the next failure recovery to rotate.
+	// Runtime-only: recipe cards serialize byte-affecting fields explicitly and
+	// never carry callbacks. No-op when nil.
+	OnDemuxFailure func(ctx context.Context, mediaFileID int, canonicalPath string) error
+	OutputDir      string // e.g., /tmp/silo-transcode/{session_id}/
 	// subtitleFilterInputPath is a parser-safe local alias used only by the
 	// libass subtitles filter. FFmpeg still opens InputPath as the media input.
 	subtitleFilterInputPath string
@@ -221,6 +229,14 @@ type TranscodeSession struct {
 	stderrLineIndex      int
 	stderrWriter         *ffmpegStderrWriter
 	restartHook          func(context.Context)
+	// demuxErrorCount counts input demux I/O failures within the current decay
+	// window; lastDemuxErrorAt timestamps the newest one. demuxStamped is set
+	// once the count crosses demuxErrorThreshold and then refuses restarts so
+	// the caller rotates instead of rebuilding the same bad transport. All
+	// three are guarded by mu.
+	demuxErrorCount  int
+	lastDemuxErrorAt time.Time
+	demuxStamped     bool
 	// generationStartedAt is when the currently-owning ffmpeg process was
 	// spawned. Output in the shared directory older than this timestamp was
 	// written by a previous generation (or a previous session sharing the
@@ -315,6 +331,16 @@ const remountStartOffsetSeconds = 0.001
 const maxPersistedFFmpegLines = 2000
 const maxPersistedFFmpegBytes = 256 * 1024
 const maxPersistedFFmpegChars = 2000
+
+// Demux failure classification. A single input demux error (a provider blip)
+// still takes the normal recovery path; demuxErrorThreshold of them inside
+// demuxErrorDecay means the source candidate is bad. The window decays so
+// unrelated failures separated by a long healthy stretch never accumulate into
+// a false stamp.
+const (
+	demuxErrorThreshold = 3
+	demuxErrorDecay     = 60 * time.Second
+)
 
 // ManifestStartupTimeout is the maximum wait for FFmpeg's first safe playback
 // window before the caller reports a retryable startup timeout.
@@ -2990,6 +3016,9 @@ func (s *TranscodeSession) RestartWithCopySeekAnchor(
 // the manifest used for copy-anchor mapping cannot be replaced by another
 // restart before the resolved numbering is applied.
 func (s *TranscodeSession) RestartSegment(ctx context.Context, segNum int) (SegmentRecoveryTarget, bool, error) {
+	if s.IsDemuxFailed() {
+		return SegmentRecoveryTarget{}, false, ErrVirtualSourceDemuxFailed
+	}
 	target, ok, err := s.ResolveSegmentRecoveryTarget(ctx, segNum)
 	if err != nil || !ok {
 		return SegmentRecoveryTarget{}, ok, err
@@ -3029,6 +3058,13 @@ func (s *TranscodeSession) restart(
 	copySeekAnchorResolved bool,
 ) error {
 	s.mu.Lock()
+	// A source candidate already stamped known-bad must not be rebuilt: the
+	// caller rotates on the next failure recovery instead of looping on the
+	// same bad transport.
+	if s.demuxStamped {
+		s.mu.Unlock()
+		return ErrVirtualSourceDemuxFailed
+	}
 	// Single-flight: a second caller arriving while a restart is in
 	// progress must not kill the process the first restart just started.
 	// It waits for the in-flight restart's outcome and returns it, so a
@@ -3871,7 +3907,89 @@ func (s *TranscodeSession) flushStderr(ctx context.Context) {
 	}
 }
 
+// demuxInputErrorLine reports whether an FFmpeg stderr line is an input
+// demuxing I/O failure. Only failures reading the input container count;
+// output errors and transient network reconnect chatter do not match.
+func demuxInputErrorLine(line string) bool {
+	return strings.Contains(line, "Error during demuxing")
+}
+
+// observeDemuxError records one input demux failure and reports whether it is
+// the occurrence that crosses the known-bad threshold. The counter resets when
+// more than demuxErrorDecay elapsed since the previous failure, so blips that
+// recover are forgiven. It reports true at most once per session: demuxStamped
+// is set under mu before returning, keeping the failure marker idempotent when
+// concurrent stderr lines arrive.
+func (s *TranscodeSession) observeDemuxError(now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.demuxStamped {
+		return false
+	}
+	if !s.lastDemuxErrorAt.IsZero() && now.Sub(s.lastDemuxErrorAt) > demuxErrorDecay {
+		s.demuxErrorCount = 0
+	}
+	s.demuxErrorCount++
+	s.lastDemuxErrorAt = now
+	if s.demuxErrorCount < demuxErrorThreshold {
+		return false
+	}
+	s.demuxStamped = true
+	return true
+}
+
+// IsDemuxFailed reports whether repeated input demux failures stamped this
+// session's source candidate known-bad. Once true, restarts are refused so the
+// caller rotates instead of rebuilding the same bad transport.
+func (s *TranscodeSession) IsDemuxFailed() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.demuxStamped
+}
+
+// notifyDemuxFailure invokes the wiring callback exactly once, off the stderr
+// goroutine so a slow persistence write cannot stall FFmpeg's stderr pipe. The
+// callback is read under mu alongside the identity it needs, then invoked with
+// a detached, bounded context.
+func (s *TranscodeSession) notifyDemuxFailure(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	cb := s.opts.OnDemuxFailure
+	fileID := s.opts.MediaFileID
+	canonical := strings.TrimSpace(s.opts.CanonicalInputPath)
+	if canonical == "" {
+		canonical = strings.TrimSpace(s.opts.InputPath)
+	}
+	s.mu.Unlock()
+	if cb == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		if err := cb(callCtx, fileID, canonical); err != nil {
+			log.Printf("playback: mark virtual candidate failed after repeated demux errors (file_id=%d): %v", fileID, err)
+		}
+	}()
+}
+
 func (s *TranscodeSession) logFFmpegLine(ctx context.Context, line string) {
+	if demuxInputErrorLine(line) {
+		if s.observeDemuxError(time.Now()) {
+			s.notifyDemuxFailure(ctx)
+		}
+	}
 	if s == nil || s.opts.FFmpegLogSink == nil {
 		return
 	}

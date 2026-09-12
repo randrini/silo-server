@@ -325,6 +325,7 @@ func PlanPlaybackV3(input PlannerInputV3) PlannerResultV3 {
 		DegradationWarnings:    []DegradationWarningV3{},
 		RequestedMediaFileID:   input.RequestedFile.ID,
 		EffectiveMediaFileID:   file.ID,
+		EffectiveVirtualURI:    effectiveVirtualURIV3(input),
 		Source:                 source,
 		SubtitleFidelityPolicy: subtitlePolicyNameV3(input.Request.SubtitleFidelityPreference),
 		Timeline:               TimelineV3{SourceStartSeconds: floatOrZeroV3(input.Request.StartPosition), PlayerStartSeconds: floatOrZeroV3(input.Request.StartPosition), CanSeekAnywhere: true, SeekRestoration: "player_position"},
@@ -796,6 +797,7 @@ func planAudioOnlyV3(input PlannerInputV3, file *models.MediaFile, source Source
 		DegradationWarnings:    []DegradationWarningV3{},
 		RequestedMediaFileID:   input.RequestedFile.ID,
 		EffectiveMediaFileID:   file.ID,
+		EffectiveVirtualURI:    effectiveVirtualURIV3(input),
 		Source:                 source,
 		SubtitleFidelityPolicy: subtitlePolicyNameV3(request.SubtitleFidelityPreference),
 		Timeline:               TimelineV3{SourceStartSeconds: floatOrZeroV3(request.StartPosition), PlayerStartSeconds: floatOrZeroV3(request.StartPosition), CanSeekAnywhere: true, SeekRestoration: "player_position"},
@@ -1464,6 +1466,19 @@ func audioSelectionUsesContainerDefaultV3(file *models.MediaFile, audioIndex int
 		audioIndex = defaultIndex
 	}
 	return audioIndex == defaultIndex
+}
+
+// effectiveVirtualURIV3 exposes the substituted virtual candidate URI on the
+// plan. A neutral catalog row (virtual://movie/ttNNNN with no result=) is
+// replaced by a probed candidate during planning; the plan's effective file ID
+// already points at that candidate, but clients that key their version menu on
+// the requested row need the URI too so a first play adopts the working
+// version. It returns "" when the effective file is not a virtual candidate.
+func effectiveVirtualURIV3(input PlannerInputV3) string {
+	if input.EffectiveFile != nil && strings.HasPrefix(input.EffectiveFile.FilePath, "virtual://") {
+		return input.EffectiveFile.FilePath
+	}
+	return ""
 }
 
 func finalizePlanIdentityV3(plan *PlanV3, attemptID string, outputContextID string) {

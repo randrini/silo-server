@@ -1287,7 +1287,23 @@ func (r *FileRepository) ReplaceVirtualCandidates(ctx context.Context, source *m
 	}
 	rows.Close()
 	if len(stale) > 0 && len(keep) > 0 {
-		if _, err := tx.Exec(ctx, `DELETE FROM media_files WHERE id = ANY($1::bigint[])`, stale); err != nil {
+		// Retention: candidate identity is a provider result id that can churn
+		// between listings, but a version a user actually played is recorded as
+		// user_watch_progress.last_file_id. Keep stale rows that are still
+		// someone's last-played file so a known-working version does not vanish
+		// from the version list when the provider re-lists with new result ids.
+		// A retained row keeps its failed_at; if it was healthy it stays
+		// selectable (a fresh listing would clear failed_at), so it remains
+		// visible until the provider truly stops offering it. These retained
+		// rows have no cleanup path here; a future retention TTL may prune them
+		// once no progress row references them (not implemented).
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM media_files
+			WHERE id = ANY($1::bigint[])
+			  AND NOT EXISTS (
+				SELECT 1 FROM user_watch_progress p
+				WHERE p.last_file_id = media_files.id
+			  )`, stale); err != nil {
 			return fmt.Errorf("delete stale virtual candidates: %w", err)
 		}
 	}

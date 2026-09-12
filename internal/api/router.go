@@ -1204,6 +1204,16 @@ func NewRouter(deps Dependencies) chi.Router {
 			// delivered, or a newer failure on the delivered candidate, is
 			// never cleared by a late delivery signal.
 			streamHandler.VirtualCandidateRecoveredMarker = scanner.NewFileRepository(deps.DB).MarkVirtualCandidateRecovered
+			// Repeated input demux failures from a local transcode mean the
+			// virtual candidate is bad, not that the transport should keep
+			// rebuilding. Stamp the effective row known-bad (CAS-fenced on its
+			// file_path) so the next failure recovery rotates candidates.
+			playbackHandler.TranscodeManager().OnDemuxFailure = func(ctx context.Context, fileID int, expectedFilePath string) error {
+				if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(expectedFilePath)), "virtual://") {
+					return nil
+				}
+				return scanner.NewFileRepository(deps.DB).MarkVirtualCandidateFailed(ctx, fileID, expectedFilePath, nil)
+			}
 			playbackHandler.VirtualFileUpdater = func(ctx context.Context, fileID int, newFilePath string) error {
 				_, _ = deps.DB.Exec(ctx, `DELETE FROM media_files WHERE file_path=$1 AND id != $2 AND virtual_owner_installation_id IS NOT NULL`, newFilePath, fileID)
 				_, err := deps.DB.Exec(ctx, `UPDATE media_files SET file_path=$1, updated_at=now() WHERE id=$2`, newFilePath, fileID)

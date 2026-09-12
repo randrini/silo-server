@@ -36,6 +36,7 @@ import type {
 } from "../realtime-protocol";
 import { resolvePendingSeekTime } from "../utils/pendingSeek";
 import { resolveVersionAudioLanguage } from "../utils/effectiveAudioLanguage";
+import { resolveEffectiveVersion } from "../utils/resolveEffectiveVersion";
 import { HlsStartupGuard } from "../utils/hlsStartupGuard";
 import { isSafariBrowserV3, resolveHLSEngineV3 } from "../utils/hlsEngine";
 import { isFirefoxUserAgent } from "../utils/browser";
@@ -587,11 +588,24 @@ export function VideoPlayer({
   const qualityOptions = useMemo(() => qualityOptionsFromPlanV3(plan), [plan]);
 
   // The file the server actually planned against, which is not necessarily the
-  // one that was asked for — a fallback to an alternate version shows up here.
+  // one that was asked for. When the plan resolved a neutral virtual row to a
+  // concrete candidate, `effective_virtual_uri` names that candidate by path;
+  // matching there is what makes the version menu light the working row.
   const effectiveVersion = useMemo(
-    () => versions.find((v) => v.file_id === plan.effective_media_file_id) ?? selectedVersion,
-    [plan.effective_media_file_id, selectedVersion, versions],
+    () =>
+      resolveEffectiveVersion(versions, {
+        mediaFileId: activeFileId ?? plan.effective_media_file_id,
+        effectiveVirtualUri: plan.effective_virtual_uri ?? null,
+      }) ?? selectedVersion,
+    [
+      activeFileId,
+      plan.effective_media_file_id,
+      plan.effective_virtual_uri,
+      selectedVersion,
+      versions,
+    ],
   );
+  const effectiveFileId = effectiveVersion?.file_id ?? plan.effective_media_file_id;
 
   // Resolve source status for the quality menu.
   // A version is "Playing" if it's the effective source.
@@ -621,15 +635,14 @@ export function VideoPlayer({
           fileId: v.file_id,
           label: `${v.resolution} ${v.codec_video.toUpperCase()}${v.hdr ? " HDR" : ""}${audioPart}`,
           releaseName: prettifyReleaseName(v.release_name ?? v.file_name),
-          isCurrentSource: v.file_id === plan.effective_media_file_id,
+          isCurrentSource: v.file_id === effectiveFileId,
           isRequestedSource:
-            (v.file_id === pendingSwitchFileId && v.file_id !== plan.effective_media_file_id) ||
-            (v.file_id === plan.requested_media_file_id &&
-              v.file_id !== plan.effective_media_file_id),
+            (v.file_id === pendingSwitchFileId && v.file_id !== effectiveFileId) ||
+            (v.file_id === plan.requested_media_file_id && v.file_id !== effectiveFileId),
           failed: v.failed,
         };
       }),
-    [versions, plan.effective_media_file_id, plan.requested_media_file_id, pendingSwitchFileId],
+    [versions, effectiveFileId, plan.requested_media_file_id, pendingSwitchFileId],
   );
 
   // Any stream restart (transcode restart on seek, quality/audio switch,
@@ -1017,13 +1030,13 @@ export function VideoPlayer({
     return {
       positionSeconds,
       durationSeconds,
-      lastFileId: activeFileId ?? selectedVersion?.file_id,
+      lastFileId: effectiveVersion?.file_id ?? activeFileId ?? selectedVersion?.file_id,
       lastResolution: selectedVersion?.resolution,
       lastHDR: selectedVersion?.hdr,
       lastCodecVideo: selectedVersion?.codec_video,
       lastEditionKey: selectedVersion?.edition_key,
     };
-  }, [activeFileId, currentTime, duration, selectedVersion]);
+  }, [activeFileId, currentTime, duration, effectiveVersion, selectedVersion]);
 
   useEffect(() => {
     if (!watchTogetherRoomId || !watchTogether.closedReason || leaveInProgressRef.current) {
@@ -2595,7 +2608,7 @@ export function VideoPlayer({
     const effectiveMode = normalizeSubtitleMode(subtitleMode);
     const audioLang =
       audioTracks[activeAudioIndex]?.language?.trim() ||
-      resolveVersionAudioLanguage(selectedVersion, activeAudioIndex);
+      resolveVersionAudioLanguage(effectiveVersion, activeAudioIndex);
 
     const match = resolveSubtitleAutoSelect({
       mode: effectiveMode,
@@ -2624,9 +2637,8 @@ export function VideoPlayer({
     profileLanguage,
     audioTracks,
     activeAudioIndex,
-    selectedVersion,
+    effectiveVersion,
     sessionId,
-    plan.effective_media_file_id,
   ]);
 
   // -- Control callbacks --
