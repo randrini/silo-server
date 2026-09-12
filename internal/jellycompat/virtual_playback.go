@@ -2,6 +2,7 @@ package jellycompat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -111,6 +112,13 @@ func (f VirtualPlaybackStreamListerFunc) ListVirtualPlaybackStreams(ctx context.
 }
 
 type VirtualSourceProber func(context.Context, string, *models.MediaFile) (*models.MediaFile, error)
+
+// VirtualFileMetadataSaver persists a probed virtual inventory back to the
+// catalog row, mirroring internal/api/handlers.VirtualFileMetadataSaver.
+// jellycompat cannot import internal/api/handlers (that package imports
+// jellycompat), so cmd/silo binds this to handlers.VirtualFileMetadataUpdateSQL
+// and the UPDATE execution there.
+type VirtualFileMetadataSaver func(ctx context.Context, fileID int, expectedFilePath string, videoTracks, audioTracks, subtitleTracks []byte, resolution, codecVideo, codecAudio, container string, hdr bool, bitrate int, duration int) error
 
 // RemoteStreamRelay is the credential-hiding, SSRF-protected transport shared
 // by direct delivery and FFmpeg inputs.
@@ -300,10 +308,97 @@ func (h *PlaybackHandler) resolveAndProbeVirtualSource(ctx context.Context, file
 		if candidate.Bitrate > 0 {
 			transient.Bitrate = candidate.Bitrate
 		}
+
+		// A row that has never been probed must run the real probe even when the
+		// provider-declared candidate metadata looks complete: declared values
+		// are not ground truth, and only a successful probe stamps
+		// probe_updated_at so later plays can take the fast candidate-merge
+		// path. Already-probed rows skip this entirely (no probe-per-play),
+		// matching the native probe gate.
+		if file.ProbeUpdatedAt == nil && h.VirtualSourceProber != nil {
+			if probed, ok := h.probeCompatVirtualSource(ctx, &transient, uri, ownerID, userID, profileID); ok {
+				if transient.ID > 0 {
+					probed.ID = transient.ID
+					probed.MediaFolderID = transient.MediaFolderID
+				}
+				if transient.Duration > 0 && probed.Duration <= 0 {
+					probed.Duration = transient.Duration
+				}
+				mergeCompatCandidateTracks(probed, candidate)
+				h.persistCompatVirtualMetadata(ctx, probed)
+				return resolvedCompatVirtualSource{file: probed, uri: uri, ownerID: ownerID}, nil
+			}
+			// Resolution or probe failed. Fall back to the candidate-declared
+			// metadata exactly like the native path: a probe must never fail the
+			// request or block playback.
+		}
+
 		mergeCompatCandidateTracks(&transient, candidate)
 		return resolvedCompatVirtualSource{file: &transient, uri: uri, ownerID: ownerID}, nil
 	}
 	return resolvedCompatVirtualSource{}, errors.New("virtual playback provider returned no usable stream")
+}
+
+// probeCompatVirtualSource resolves the candidate to a temporary provider URL
+// and probes that stream for real metadata. It mirrors the native path's
+// resolve-then-probe ordering (native probeVirtualSource). ok is false when the
+// URL cannot be resolved or the probe fails, so the caller falls back to the
+// candidate-declared inventory.
+func (h *PlaybackHandler) probeCompatVirtualSource(ctx context.Context, transient *models.MediaFile, uri string, ownerID, userID int, profileID string) (*models.MediaFile, bool) {
+	if h == nil || h.VirtualSourceProber == nil || transient == nil || !isCompatVirtualPath(uri) {
+		return nil, false
+	}
+	resolved, err := h.resolveVirtualTransportForIdentity(ctx, userID, profileID, PlaybackMediaSource{
+		FileID:                           transient.ID,
+		VirtualSourceURI:                 uri,
+		VirtualSourceOwnerInstallationID: ownerID,
+	}, false)
+	if err != nil || strings.TrimSpace(resolved.URL) == "" {
+		return nil, false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, compatVirtualProbeTimeout)
+	defer cancel()
+	probed, err := h.VirtualSourceProber(probeCtx, resolved.URL, transient)
+	if err != nil || probed == nil {
+		return nil, false
+	}
+	return probed, true
+}
+
+// persistCompatVirtualMetadata stamps a successfully probed virtual inventory
+// back to the catalog row in the background, mirroring the native
+// persistVirtualMetadataBounded pattern. It stamps probe_updated_at through the
+// bound SQL so the next play takes the fast candidate-merge path.
+func (h *PlaybackHandler) persistCompatVirtualMetadata(ctx context.Context, file *models.MediaFile) {
+	if h == nil || h.VirtualFileMetadataSaver == nil || file == nil || file.ID <= 0 {
+		return
+	}
+	videoJSON := marshalCompatTracks(file.VideoTracks)
+	audioJSON := marshalCompatTracks(file.AudioTracks)
+	subJSON := marshalCompatTracks(file.SubtitleTracks)
+	res, vCodec, aCodec, container, hdr, bitrate, duration := file.Resolution, file.CodecVideo, file.CodecAudio, file.Container, file.HDR, file.Bitrate, file.Duration
+	expectedFilePath := file.FilePath
+	targetID := file.ID
+	go func() {
+		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := h.VirtualFileMetadataSaver(persistCtx, targetID, expectedFilePath, videoJSON, audioJSON, subJSON, res, vCodec, aCodec, container, hdr, bitrate, duration); err != nil {
+			slog.ErrorContext(persistCtx, "compat virtual metadata persist failed", "component", "jellycompat", "file_id", targetID, "error", err)
+		}
+	}()
+}
+
+// marshalCompatTracks renders track slices as JSON arrays, never a bare null,
+// so the jsonb array operations in the persistence SQL stay valid.
+func marshalCompatTracks(tracks any) []byte {
+	if tracks == nil {
+		return []byte("[]")
+	}
+	data, err := json.Marshal(tracks)
+	if err != nil || string(data) == "null" {
+		return []byte("[]")
+	}
+	return data
 }
 
 func mergeCompatCandidateTracks(probed *models.MediaFile, candidate VirtualPlaybackStream) {

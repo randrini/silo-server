@@ -3121,6 +3121,25 @@ func main() {
 					})
 				})
 			}
+			compatDeps.VirtualFileMetadataSaver = func(ctx context.Context, fileID int, expectedFilePath string, videoTracks, audioTracks, subtitleTracks []byte, resolution, codecVideo, codecAudio, container string, hdr bool, bitrate int, duration int) error {
+				if deps.DB == nil {
+					return nil
+				}
+				vStr := string(videoTracks)
+				if vStr == "" || vStr == "null" {
+					vStr = "[]"
+				}
+				aStr := string(audioTracks)
+				if aStr == "" || aStr == "null" {
+					aStr = "[]"
+				}
+				sStr := string(subtitleTracks)
+				if sStr == "" || sStr == "null" {
+					sStr = "[]"
+				}
+				_, err := deps.DB.Exec(ctx, handlers.VirtualFileMetadataUpdateSQL, vStr, aStr, sStr, resolution, codecVideo, codecAudio, container, hdr, bitrate, duration, fileID, expectedFilePath)
+				return err
+			}
 		}
 
 		// Wire direct dependencies when DB is available.

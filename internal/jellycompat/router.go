@@ -167,6 +167,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	playbackHandler.VirtualMediaDetailedResolver = deps.VirtualMediaDetailedResolver
 	playbackHandler.VirtualPlaybackStreamLister = deps.VirtualPlaybackStreamLister
 	playbackHandler.VirtualSourceProber = deps.VirtualSourceProber
+	playbackHandler.VirtualFileMetadataSaver = deps.VirtualFileMetadataSaver
 	playbackHandler.RemoteStreamRelay = deps.RemoteStreamRelay
 	playbackHandler.AllowInsecureVirtual = deps.AllowInsecureVirtual
 	if subtitleRepo != nil {

@@ -1228,3 +1228,195 @@ func serveStreamWithSession(handler *PlaybackHandler, encodedID, rawQuery, token
 	handler.HandleVideoStream(rec, req)
 	return rec
 }
+
+// An unprobed virtual row must invoke the real prober even though the listed
+// candidate declares complete metadata, merge the probed ground truth into the
+// returned file, and persist the probed inventory through the saver dep (which
+// stamps probe_updated_at in production).
+func TestResolveAndProbeVirtualSourceProbesUnprobedRowAndPersists(t *testing.T) {
+	candidateURI := "virtual://movie/tt0133093?profile=1080p&result=stable"
+	file := &models.MediaFile{
+		ID:                         42,
+		FilePath:                   "virtual://movie/tt0133093?profile=1080p",
+		Container:                  "virtual",
+		VirtualOwnerInstallationID: 7,
+	}
+
+	var probedURL string
+	probeCalls := 0
+	saverDone := make(chan struct{})
+	var savedID int
+	var savedPath, savedVideo, savedAudio string
+
+	h := &PlaybackHandler{
+		VirtualMediaResolver: VirtualMediaResolverFunc(func(_ context.Context, uri string, owner, _ int, _ string) (string, error) {
+			if !isCompatVirtualPath(uri) || owner != 7 {
+				t.Fatalf("resolver called with uri=%q owner=%d", uri, owner)
+			}
+			return "https://provider.example/stream.mkv", nil
+		}),
+		VirtualPlaybackStreamLister: VirtualPlaybackStreamListerFunc(func(context.Context, string, int, string, int) ([]VirtualPlaybackStream, error) {
+			return []VirtualPlaybackStream{{
+				URI:                 candidateURI,
+				Label:               "1080p",
+				Resolution:          "1080p",
+				CodecVideo:          "h264",
+				CodecAudio:          "aac",
+				Container:           "mkv",
+				OwnerInstallationID: 7,
+			}}, nil
+		}),
+		VirtualSourceProber: func(_ context.Context, sourceURL string, f *models.MediaFile) (*models.MediaFile, error) {
+			probeCalls++
+			probedURL = sourceURL
+			// Ground truth differs from the candidate declaration: hevc/eac3,
+			// not h264/aac.
+			probed := *f
+			probed.Resolution = "2160p"
+			probed.CodecVideo = "hevc"
+			probed.CodecAudio = "eac3"
+			probed.Container = "mkv"
+			probed.VideoTracks = []models.VideoTrack{{Codec: "hevc", Width: 3840, Height: 2160}}
+			probed.AudioTracks = []models.AudioTrack{{Codec: "eac3", Channels: 6, Language: "eng", Default: true}}
+			probed.SubtitleTracks = []models.SubtitleTrack{{Codec: "srt", Language: "eng"}}
+			return &probed, nil
+		},
+		VirtualFileMetadataSaver: func(_ context.Context, fileID int, expectedFilePath string, videoTracks, audioTracks, subtitleTracks []byte, _, _, _, _ string, _ bool, _ int, _ int) error {
+			savedID = fileID
+			savedPath = expectedFilePath
+			savedVideo = string(videoTracks)
+			savedAudio = string(audioTracks)
+			close(saverDone)
+			return nil
+		},
+	}
+
+	resolved, err := h.resolveAndProbeVirtualSource(context.Background(), file, 1, "profile-1")
+	if err != nil {
+		t.Fatalf("resolveAndProbeVirtualSource: %v", err)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("prober calls = %d, want 1", probeCalls)
+	}
+	if probedURL != "https://provider.example/stream.mkv" {
+		t.Fatalf("probed URL = %q, want resolved provider URL", probedURL)
+	}
+	if len(resolved.file.VideoTracks) != 1 || resolved.file.VideoTracks[0].Codec != "hevc" {
+		t.Fatalf("returned video tracks = %#v, want probed hevc", resolved.file.VideoTracks)
+	}
+	if len(resolved.file.AudioTracks) != 1 || resolved.file.AudioTracks[0].Codec != "eac3" {
+		t.Fatalf("returned audio tracks = %#v, want probed eac3", resolved.file.AudioTracks)
+	}
+
+	select {
+	case <-saverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("probed inventory was not persisted through the saver dep")
+	}
+	if savedID != 42 || savedPath != candidateURI {
+		t.Fatalf("persist target id=%d path=%q, want 42/%q", savedID, savedPath, candidateURI)
+	}
+	if !strings.Contains(savedVideo, "hevc") || strings.Contains(savedVideo, "h264") {
+		t.Fatalf("persisted video tracks = %s, want probed hevc", savedVideo)
+	}
+	if !strings.Contains(savedAudio, "eac3") {
+		t.Fatalf("persisted audio tracks = %s, want probed eac3", savedAudio)
+	}
+}
+
+// A row that already carries a probe stamp keeps the fast candidate-merge path:
+// neither the resolver nor the prober is invoked on replay.
+func TestResolveAndProbeVirtualSourceSkipsProbeWhenAlreadyProbed(t *testing.T) {
+	probedAt := time.Now().Add(-time.Hour)
+	candidateURI := "virtual://movie/tt0133093?profile=1080p&result=stable"
+	file := &models.MediaFile{
+		ID:                         42,
+		FilePath:                   candidateURI,
+		Container:                  "mkv",
+		ProbeUpdatedAt:             &probedAt,
+		VirtualOwnerInstallationID: 7,
+		VideoTracks:                []models.VideoTrack{{Codec: "hevc", Width: 3840, Height: 2160}},
+	}
+
+	resolverCalls := 0
+	probeCalls := 0
+	h := &PlaybackHandler{
+		VirtualMediaResolver: VirtualMediaResolverFunc(func(context.Context, string, int, int, string) (string, error) {
+			resolverCalls++
+			return "https://provider.example/stream.mkv", nil
+		}),
+		VirtualSourceProber: func(context.Context, string, *models.MediaFile) (*models.MediaFile, error) {
+			probeCalls++
+			return nil, nil
+		},
+	}
+
+	resolved, err := h.resolveAndProbeVirtualSource(context.Background(), file, 1, "profile-1")
+	if err != nil {
+		t.Fatalf("resolveAndProbeVirtualSource: %v", err)
+	}
+	if resolverCalls != 0 {
+		t.Fatalf("resolver calls = %d, want 0 for an already-probed row", resolverCalls)
+	}
+	if probeCalls != 0 {
+		t.Fatalf("prober calls = %d, want 0 for an already-probed row", probeCalls)
+	}
+	if len(resolved.file.VideoTracks) != 1 || resolved.file.VideoTracks[0].Codec != "hevc" {
+		t.Fatalf("stored video tracks = %#v, want preserved hevc", resolved.file.VideoTracks)
+	}
+}
+
+// A probe failure must fall back to the candidate-declared inventory, must not
+// call the saver, and must not fail the request.
+func TestResolveAndProbeVirtualSourceFallsBackOnProbeError(t *testing.T) {
+	file := &models.MediaFile{
+		ID:                         42,
+		FilePath:                   "virtual://movie/tt0133093?profile=1080p",
+		Container:                  "virtual",
+		VirtualOwnerInstallationID: 7,
+	}
+
+	saverCalls := 0
+	h := &PlaybackHandler{
+		VirtualMediaResolver: VirtualMediaResolverFunc(func(context.Context, string, int, int, string) (string, error) {
+			return "https://provider.example/stream.mkv", nil
+		}),
+		VirtualPlaybackStreamLister: VirtualPlaybackStreamListerFunc(func(context.Context, string, int, string, int) ([]VirtualPlaybackStream, error) {
+			return []VirtualPlaybackStream{{
+				URI:                 "virtual://movie/tt0133093?profile=1080p&result=stable",
+				Label:               "1080p",
+				Resolution:          "1080p",
+				CodecVideo:          "h264",
+				CodecAudio:          "aac",
+				Container:           "mkv",
+				OwnerInstallationID: 7,
+			}}, nil
+		}),
+		VirtualSourceProber: func(context.Context, string, *models.MediaFile) (*models.MediaFile, error) {
+			return nil, errors.New("probe timed out")
+		},
+		VirtualFileMetadataSaver: func(context.Context, int, string, []byte, []byte, []byte, string, string, string, string, bool, int, int) error {
+			saverCalls++
+			return nil
+		},
+	}
+
+	resolved, err := h.resolveAndProbeVirtualSource(context.Background(), file, 1, "profile-1")
+	if err != nil {
+		t.Fatalf("resolveAndProbeVirtualSource returned error on probe failure: %v", err)
+	}
+	if resolved.file == nil {
+		t.Fatal("resolved file is nil")
+	}
+	// Declared fallback synthesizes the candidate's h264/aac inventory.
+	if resolved.file.CodecVideo != "h264" || resolved.file.CodecAudio != "aac" {
+		t.Fatalf("declared fallback codecs = %q/%q, want h264/aac", resolved.file.CodecVideo, resolved.file.CodecAudio)
+	}
+	if len(resolved.file.VideoTracks) != 1 || resolved.file.VideoTracks[0].Codec != "h264" {
+		t.Fatalf("declared fallback video tracks = %#v, want h264", resolved.file.VideoTracks)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if saverCalls != 0 {
+		t.Fatalf("saver calls = %d, want 0 after probe failure", saverCalls)
+	}
+}
