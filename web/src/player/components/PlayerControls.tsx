@@ -103,9 +103,14 @@ interface PlayerControlsProps {
   onSurfaceTap?: () => void;
 }
 
-/** Skip amount for the ±seconds buttons, matching keyboard shortcuts. */
-export const SKIP_BACK_SECONDS = 10;
-export const SKIP_FORWARD_SECONDS = 30;
+/**
+ * Skip amount for the on-screen ±seconds buttons. The keyboard arrows nudge by
+ * a shorter amount (`KEYBOARD_SKIP_SECONDS` in useKeyboardShortcuts); the
+ * buttons make a long jump for viewers driving with a pointer.
+ */
+export const SKIP_BUTTON_SECONDS = 30;
+export const SKIP_BACK_SECONDS = SKIP_BUTTON_SECONDS;
+export const SKIP_FORWARD_SECONDS = SKIP_BUTTON_SECONDS;
 
 export function PlayerControls({
   visible,

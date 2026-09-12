@@ -1,10 +1,11 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { FileVersion } from "@/api/types";
 import VersionDropdown from "./VersionDropdown";
 import VersionFlyoutItems from "./VersionFlyout";
+import { useVersionVisibility } from "./versionAvailability";
 
 vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenuLabel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -152,5 +153,51 @@ describe("VersionFlyoutItems unavailable versions", () => {
     expect(unavailableRow).toBeInTheDocument();
     expect(screen.getByText("Will retry on play")).toBeInTheDocument();
     expect(unavailableRow).toHaveClass("opacity-80");
+  });
+});
+
+describe("useVersionVisibility toggle stability", () => {
+  function renderVisibility(versions: FileVersion[]) {
+    return renderHook(({ list }: { list: FileVersion[] }) => useVersionVisibility(list, null), {
+      initialProps: { list: versions },
+    });
+  }
+
+  it("keeps the Show unavailable toggle when candidate ids rotate under the same count", () => {
+    const { result, rerender } = renderVisibility([
+      makeVersion({ file_id: 1 }),
+      makeVersion({ file_id: 2, available: false }),
+    ]);
+
+    act(() => result.current.setShowUnavailable(true));
+    expect(result.current.showUnavailable).toBe(true);
+
+    // A liveness poll resolves the virtual candidate to a different id while
+    // the count is unchanged; the viewer's toggle must not snap back.
+    rerender({
+      list: [makeVersion({ file_id: 11 }), makeVersion({ file_id: 12, available: false })],
+    });
+
+    expect(result.current.showUnavailable).toBe(true);
+  });
+
+  it("resets the Show unavailable toggle when the version count changes", () => {
+    const { result, rerender } = renderVisibility([
+      makeVersion({ file_id: 1 }),
+      makeVersion({ file_id: 2, available: false }),
+    ]);
+
+    act(() => result.current.setShowUnavailable(true));
+    expect(result.current.showUnavailable).toBe(true);
+
+    rerender({
+      list: [
+        makeVersion({ file_id: 3 }),
+        makeVersion({ file_id: 4 }),
+        makeVersion({ file_id: 5, available: false }),
+      ],
+    });
+
+    expect(result.current.showUnavailable).toBe(false);
   });
 });

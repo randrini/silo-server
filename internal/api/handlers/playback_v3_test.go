@@ -4139,6 +4139,77 @@ func TestRemapSubtitleSelectionV3RejectsNegativeIndex(t *testing.T) {
 	}
 }
 
+// downloadedSubtitleRepoByFile returns a distinct downloaded-subtitle list per
+// media file, unlike handlerMockSubtitleRepo which returns one list regardless
+// of file. Remap tests need the two versions' rows to differ.
+type downloadedSubtitleRepoByFile struct {
+	subtitles.Repository
+	byFile map[int][]subtitles.DownloadedSubtitle
+}
+
+func (r downloadedSubtitleRepoByFile) ListDownloadedSubtitles(_ context.Context, mediaFileID int) ([]subtitles.DownloadedSubtitle, error) {
+	return append([]subtitles.DownloadedSubtitle(nil), r.byFile[mediaFileID]...), nil
+}
+
+func (r downloadedSubtitleRepoByFile) GetDownloadedSubtitle(_ context.Context, id int) (*subtitles.DownloadedSubtitle, error) {
+	for _, list := range r.byFile {
+		for i := range list {
+			if list[i].ID == id {
+				copy := list[i]
+				return &copy, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+func TestRemapSubtitleSelectionV3PrefersDownloadedSubtitleID(t *testing.T) {
+	source := &models.MediaFile{ID: 1}
+	target := &models.MediaFile{ID: 2}
+	repo := downloadedSubtitleRepoByFile{byFile: map[int][]subtitles.DownloadedSubtitle{
+		source.ID: {{ID: 71, MediaFileID: source.ID, Language: "eng", Format: subtitles.FormatSRT}},
+		// Two same-language/format rows with the empty release name virtual
+		// rows persist. Only the stable id distinguishes them.
+		target.ID: {
+			{ID: 72, MediaFileID: target.ID, Language: "eng", Format: subtitles.FormatSRT},
+			{ID: 71, MediaFileID: target.ID, Language: "eng", Format: subtitles.FormatSRT},
+		},
+	}}
+	handler := &PlaybackHandler{SubtitleRepo: repo}
+	index := 0
+	request := playback.StartRequestV3{SubtitleTrackIndex: &index}
+	if err := handler.remapSubtitleSelectionV3(context.Background(), source, target, &request); err != nil {
+		t.Fatalf("remap failed: %v", err)
+	}
+	if request.SubtitleTrackIndex == nil || *request.SubtitleTrackIndex != 1 {
+		t.Fatalf("remap index = %v, want 1 (id-matched row)", request.SubtitleTrackIndex)
+	}
+	if request.SubtitleTrackID != playback.TrackIDV3(target.ID, "subtitle", 1) {
+		t.Fatalf("remap id = %q, want target index 1 identity", request.SubtitleTrackID)
+	}
+}
+
+func TestRemapSubtitleSelectionV3FallsBackToReleaseNameWithoutIDs(t *testing.T) {
+	source := &models.MediaFile{ID: 3}
+	target := &models.MediaFile{ID: 4}
+	repo := downloadedSubtitleRepoByFile{byFile: map[int][]subtitles.DownloadedSubtitle{
+		source.ID: {{Language: "eng", Format: subtitles.FormatSRT, ReleaseName: "release-a"}},
+		target.ID: {
+			{Language: "eng", Format: subtitles.FormatSRT, ReleaseName: "release-b"},
+			{Language: "eng", Format: subtitles.FormatSRT, ReleaseName: "release-a"},
+		},
+	}}
+	handler := &PlaybackHandler{SubtitleRepo: repo}
+	index := 0
+	request := playback.StartRequestV3{SubtitleTrackIndex: &index}
+	if err := handler.remapSubtitleSelectionV3(context.Background(), source, target, &request); err != nil {
+		t.Fatalf("remap failed: %v", err)
+	}
+	if request.SubtitleTrackIndex == nil || *request.SubtitleTrackIndex != 1 {
+		t.Fatalf("remap index = %v, want 1 (release-name match)", request.SubtitleTrackIndex)
+	}
+}
+
 func TestRouteEventV3HasPerUserLimitAcrossAttemptIDs(t *testing.T) {
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	for i := 0; i < 600; i++ {

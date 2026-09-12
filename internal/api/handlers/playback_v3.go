@@ -6819,10 +6819,29 @@ func (h *PlaybackHandler) remapSubtitleSelectionV3(ctx context.Context, source, 
 			downloadedIndex := index - len(source.ExternalSubtitles) - len(source.SubtitleTracks)
 			if sourceErr == nil && targetErr == nil && downloadedIndex >= 0 && downloadedIndex < len(sourceDownloaded) {
 				wanted := sourceDownloaded[downloadedIndex]
-				for candidateIndex, candidate := range targetDownloaded {
-					if strings.EqualFold(candidate.Language, wanted.Language) && strings.EqualFold(string(candidate.Format), string(wanted.Format)) && strings.EqualFold(candidate.ReleaseName, wanted.ReleaseName) {
-						targetIndex = len(target.ExternalSubtitles) + len(target.SubtitleTracks) + candidateIndex
-						break
+				base := len(target.ExternalSubtitles) + len(target.SubtitleTracks)
+				// The stable downloaded-subtitle row id (carried in the plan
+				// inventory) is the only reliable identity here. Virtual rows
+				// persist release_name as "" (see ReplaceVirtualCandidates and
+				// upsertVirtualFileVariant), so two same-language/format
+				// downloaded tracks are indistinguishable by ReleaseName and a
+				// first-match scan would collapse them onto one target row.
+				// Resolve the id first, then fall back to the historical
+				// language/format/ReleaseName match for rows that carry no id.
+				if wanted.ID > 0 {
+					for candidateIndex, candidate := range targetDownloaded {
+						if candidate.ID == wanted.ID {
+							targetIndex = base + candidateIndex
+							break
+						}
+					}
+				}
+				if targetIndex < 0 {
+					for candidateIndex, candidate := range targetDownloaded {
+						if strings.EqualFold(candidate.Language, wanted.Language) && strings.EqualFold(string(candidate.Format), string(wanted.Format)) && strings.EqualFold(candidate.ReleaseName, wanted.ReleaseName) {
+							targetIndex = base + candidateIndex
+							break
+						}
 					}
 				}
 			}

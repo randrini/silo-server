@@ -103,7 +103,8 @@ vi.mock("hls.js", () => ({
   },
 }));
 vi.mock("./PlayerControls", () => ({
-  SKIP_BACK_SECONDS: 10,
+  SKIP_BUTTON_SECONDS: 30,
+  SKIP_BACK_SECONDS: 30,
   SKIP_FORWARD_SECONDS: 30,
   PlayerControls: vi.fn(
     (props: {
@@ -272,7 +273,8 @@ describe("VideoPlayer plan failure recovery", () => {
         controls.current?.onSurfaceTap?.(leftTap);
         controls.current?.onSurfaceTap?.(leftTap);
       });
-      expect(playerSeek).toHaveBeenCalledWith(40);
+      // Double-tap reuses the 30s back-button constant (50 - 30).
+      expect(playerSeek).toHaveBeenCalledWith(20);
     } finally {
       vi.useRealTimers();
       vi.unstubAllGlobals();
@@ -1654,5 +1656,105 @@ describe("VideoPlayer version switch UX", () => {
     // Auto-select with mode "always" and preferred language "en" finds no
     // English track, so subtitles reset to off.
     await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBeNull());
+  });
+
+  it("remaps a manual subtitle selection when the effective virtual URI rotates under the same id", async () => {
+    const virtualRow = {
+      ...versionA,
+      file_id: 100,
+      container: "virtual",
+      file_path: "virtual://movie/tt1?result=all",
+    };
+    const candidateA = {
+      ...versionA,
+      file_id: 7,
+      file_path: "/media/Movies/Example (2024)/Example.A.mkv",
+    };
+    const candidateB = {
+      ...versionA,
+      file_id: 8,
+      file_path: "/media/Movies/Example (2024)/Example.B.mkv",
+    };
+    const englishTrack: PlayerSubtitleInfo = {
+      index: 0,
+      media_file_id: 7,
+      track_id: "file:7:subtitle:0",
+      language: "en",
+      codec: "srt",
+      label: "English",
+      source: "external",
+      url: "/stream/session-1/subtitles/0.vtt",
+    };
+    const frenchTrack: PlayerSubtitleInfo = {
+      index: 1,
+      media_file_id: 7,
+      track_id: "file:7:subtitle:1",
+      language: "fr",
+      codec: "srt",
+      label: "French",
+      source: "external",
+      url: "/stream/session-1/subtitles/1.vtt",
+    };
+    const initialPlan = fixturePlanV3({
+      ...directPlan,
+      plan_id: "plan:virtual-a",
+      plan_attempt_key: "v3:virtual-a",
+      requested_media_file_id: 100,
+      effective_media_file_id: 100,
+      effective_virtual_uri: candidateA.file_path,
+    });
+    const { rerenderPlayer } = renderPlayer({
+      plan: initialPlan,
+      versions: [virtualRow, candidateA],
+      activeFileId: 100,
+      subtitleUrls: [englishTrack, frenchTrack],
+      subtitleMode: "always",
+      preferredSubtitleLanguage: "en",
+    });
+
+    // The viewer manually picks French (index 1).
+    act(() => {
+      controls.current?.onSubtitleSelect?.(1);
+    });
+    await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBe(1));
+
+    // The collapsed id stays 100; only the concrete candidate rotates. The new
+    // candidate's inventory reorders tracks so the raw index would silently
+    // switch to English, while the identity remap keeps French.
+    const rotatedPlan = fixturePlanV3({
+      ...directPlan,
+      plan_id: "plan:virtual-b",
+      plan_attempt_key: "v3:virtual-b",
+      requested_media_file_id: 100,
+      effective_media_file_id: 100,
+      effective_virtual_uri: candidateB.file_path,
+    });
+    const frenchInNewCandidate: PlayerSubtitleInfo = {
+      index: 0,
+      media_file_id: 8,
+      track_id: "file:8:subtitle:0",
+      language: "fr",
+      codec: "srt",
+      label: "French",
+      source: "external",
+      url: "/stream/session-100/subtitles/0.vtt",
+    };
+    const englishInNewCandidate: PlayerSubtitleInfo = {
+      index: 1,
+      media_file_id: 8,
+      track_id: "file:8:subtitle:1",
+      language: "en",
+      codec: "srt",
+      label: "English",
+      source: "external",
+      url: "/stream/session-100/subtitles/1.vtt",
+    };
+    rerenderPlayer({
+      plan: rotatedPlan,
+      planRevision: 2,
+      subtitleUrls: [frenchInNewCandidate, englishInNewCandidate],
+    });
+
+    await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBe(0));
   });
 });

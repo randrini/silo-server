@@ -73,6 +73,20 @@ function patchChapterThumbnail(
 }
 
 /**
+ * Short human label for the catalogue row the plan landed on, used to name the
+ * substituted source in the version-swap notice. Returns null when the row
+ * carries nothing recognizable, so the notice can fall back to generic copy.
+ */
+function buildEffectiveVersionLabel(version: PlayerFileVersion): string | null {
+  const video = version.codec_video ? version.codec_video.toUpperCase() : "";
+  const parts = [version.resolution, video].filter((part) => part.trim().length > 0);
+  if (parts.length === 0) {
+    return null;
+  }
+  return `${parts.join(" ")}${version.hdr ? " HDR" : ""}`;
+}
+
+/**
  * WatchPage is the top-level player component.
  * Starts a playback session, then renders the VideoPlayer once the stream is ready.
  */
@@ -629,14 +643,31 @@ export function WatchPage({
   const versionWasSubstituted =
     !!plan &&
     (plan.requested_media_file_id !== plan.effective_media_file_id || virtualSubstitution);
+  // Name the row the plan actually landed on when we can resolve it, so the
+  // notice says what is playing instead of only that something changed. The
+  // effective row is resolved through the plan's own ids/path, not the
+  // session's requested id, because the plan's effective id is the authority.
+  const effectiveVersionRow = plan
+    ? resolveEffectiveVersion(playbackVersions, {
+        // A published virtual URI is the sole identity of the effective
+        // candidate; the collapsed id names the neutral row, so falling back
+        // to it would label the wrong row. Only fall back to the id for
+        // ordinary files and older plans that publish no URI.
+        mediaFileId: plan.effective_virtual_uri ? null : plan.effective_media_file_id,
+        effectiveVirtualUri: plan.effective_virtual_uri ?? null,
+      })
+    : undefined;
+  const effectiveVersionLabel = effectiveVersionRow
+    ? buildEffectiveVersionLabel(effectiveVersionRow)
+    : null;
+  const substitutionCopy = effectiveVersionLabel
+    ? `The selected version wasn't available, so Silo is playing ${effectiveVersionLabel} instead.`
+    : "Playing a different version than selected — the requested version isn't playable on this device.";
   const versionSwapNotice =
     versionWasSubstituted && !explicitFileSelection && !versionSwapNoticeDismissed ? (
       <div className="absolute top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-1/2 z-50 -translate-x-1/2">
         <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1.5 text-xs font-medium text-white/80 shadow-lg backdrop-blur">
-          <span>
-            Playing a different version than selected — the requested version isn't playable on this
-            device.
-          </span>
+          <span>{substitutionCopy}</span>
           <button
             type="button"
             aria-label="Dismiss version notice"

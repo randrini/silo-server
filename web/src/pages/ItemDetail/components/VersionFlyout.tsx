@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { ListFilter, Play } from "lucide-react";
 import type { FileVersion } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
@@ -94,7 +95,7 @@ interface VersionFlyoutItemsProps {
 }
 
 export default function VersionFlyoutItems({ versions, onPlayVersion }: VersionFlyoutItemsProps) {
-  const sorted = sortByResolution(versions);
+  const sorted = useMemo(() => sortByResolution(versions), [versions]);
   const { visibleVersions, hiddenUnavailableCount, setShowUnavailable } = useVersionVisibility(
     sorted,
     null,

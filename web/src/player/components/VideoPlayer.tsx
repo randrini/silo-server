@@ -431,8 +431,12 @@ export function VideoPlayer({
   const subtitleSelectionWasManualRef = useRef(false);
   // Previous effective media file and subtitle inventory, so a version switch
   // can remap a manual subtitle selection to the equivalent track in the new
-  // file's inventory by identity rather than by raw index.
+  // file's inventory by identity rather than by raw index. The virtual URI is
+  // part of the identity because the server collapses a neutral virtual row to
+  // a concrete candidate while keeping `effective_media_file_id` unchanged, so
+  // a candidate rotation under the same id is only visible in the URI.
   const lastEffectiveMediaFileIdRef = useRef<number | null>(null);
+  const lastEffectiveVirtualUriRef = useRef<string | null>(null);
   const lastSubtitleTracksRef = useRef<PlayerSubtitleInfo[]>([]);
   // Staged identity remap from a version switch, applied by the auto-select
   // effect before any selection logic runs against the new inventory.
@@ -2530,12 +2534,18 @@ export function VideoPlayer({
   // staged in a ref and applied by the auto-select effect.
   useEffect(() => {
     const effectiveFileId = plan.effective_media_file_id;
+    const effectiveVirtualUri = plan.effective_virtual_uri ?? null;
     const previousFileId = lastEffectiveMediaFileIdRef.current;
+    const previousVirtualUri = lastEffectiveVirtualUriRef.current;
     lastEffectiveMediaFileIdRef.current = effectiveFileId;
+    lastEffectiveVirtualUriRef.current = effectiveVirtualUri;
     const previousTracks = lastSubtitleTracksRef.current;
     lastSubtitleTracksRef.current = effectiveSubtitleTracks;
 
-    if (previousFileId === null || previousFileId === effectiveFileId) {
+    if (
+      previousFileId === null ||
+      (previousFileId === effectiveFileId && previousVirtualUri === effectiveVirtualUri)
+    ) {
       return;
     }
     if (!subtitleSelectionWasManualRef.current) {
@@ -2563,7 +2573,12 @@ export function VideoPlayer({
       // Nothing matches in the new inventory: reset to auto-select.
       subtitleSelectionWasManualRef.current = false;
     }
-  }, [activeSubtitleIndex, effectiveSubtitleTracks, plan.effective_media_file_id]);
+  }, [
+    activeSubtitleIndex,
+    effectiveSubtitleTracks,
+    plan.effective_media_file_id,
+    plan.effective_virtual_uri,
+  ]);
 
   // A refusal pin belongs only to the session that rejected the automatic
   // selection. Clear it before the auto-selection effect evaluates a new

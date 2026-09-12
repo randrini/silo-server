@@ -289,3 +289,53 @@ func TestMatchAudioTrackAcrossVersions_MULTiCrossFile(t *testing.T) {
 		t.Fatalf("absent-track remap = %d, want target default 2", got)
 	}
 }
+
+func TestMatchAudioTrackAcrossVersionsTriesEveryLanguage(t *testing.T) {
+	requested := []models.AudioTrack{
+		{Language: "es", Codec: "ac3", Channels: 2, Default: true},
+		{Language: "mul", Languages: []string{"en", "fr"}, Codec: "eac3", Channels: 6, Title: "MULTi"},
+	}
+	effective := []models.AudioTrack{
+		{Language: "es", Codec: "ac3", Channels: 2, Default: true},
+		{Language: "fr", Codec: "eac3", Channels: 6, Title: "French"},
+	}
+
+	// The requested MULTi track carries [en, fr]. "en" is absent from the
+	// target but "fr" is present, so the remap must follow the later language
+	// instead of degrading to the target default.
+	if got := playback.MatchAudioTrackAcrossVersions(requested, effective, 1); got != 1 {
+		t.Fatalf("second-language MULTi remap = %d, want target French track 1", got)
+	}
+}
+
+func TestMatchAudioTrackAcrossVersionsTriesLanguageListAfterPrimary(t *testing.T) {
+	requested := []models.AudioTrack{
+		{Language: "en", Languages: []string{"en", "de"}, Codec: "eac3", Channels: 6, Title: "MULTi"},
+	}
+	effective := []models.AudioTrack{
+		{Language: "es", Codec: "ac3", Channels: 2, Default: true},
+		{Language: "de", Codec: "eac3", Channels: 6},
+	}
+
+	// A concrete primary language that is absent from the target must not stop
+	// the match from considering the track's other declared languages.
+	if got := playback.MatchAudioTrackAcrossVersions(requested, effective, 0); got != 1 {
+		t.Fatalf("language-list fallback = %d, want target German track 1", got)
+	}
+}
+
+func TestMatchAudioTrackAcrossVersionsFallsBackToDefaultWhenNoLanguageMatches(t *testing.T) {
+	requested := []models.AudioTrack{
+		{Language: "mul", Languages: []string{"en", "fr"}, Codec: "eac3", Channels: 6},
+	}
+	effective := []models.AudioTrack{
+		{Language: "es", Codec: "ac3", Channels: 2, Default: true},
+		{Language: "ja", Codec: "aac", Channels: 2},
+	}
+
+	// When no carried language exists on the target, the default track still
+	// wins over the first track.
+	if got := playback.MatchAudioTrackAcrossVersions(requested, effective, 0); got != 0 {
+		t.Fatalf("no-language-match remap = %d, want target default 0", got)
+	}
+}

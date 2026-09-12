@@ -31,9 +31,15 @@ export function useVersionVisibility(
   const [showUnavailable, setShowUnavailable] = useState(false);
 
   // Reset the toggle when the version set changes (e.g. navigating to a
-  // different item or switching editions) so a stale "show all" never leaks
-  // into a fresh list. Same render-time adjustment pattern as MovieContent.
-  const signature = versions.map((version) => version.file_id).join(",");
+  // different item or a different edition count) so a stale "show all" never
+  // leaks into a fresh list. Same render-time adjustment pattern as
+  // MovieContent. The signature is the version count, not the file_ids: a
+  // virtual row's resolved candidate can rotate its id between liveness polls
+  // while the viewer is looking, and keying on ids reset the toggle under
+  // them. A genuinely different list with the same count keeps the toggle too;
+  // that churn is frequent and availability state, not row identity, drives
+  // the rows.
+  const signature = versions.length;
   const [prevSignature, setPrevSignature] = useState(signature);
   if (prevSignature !== signature) {
     setPrevSignature(signature);

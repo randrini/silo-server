@@ -1,9 +1,16 @@
 import { useEffect } from "react";
 
 /**
+ * Arrow-key seek amount. Shorter than the on-screen ±buttons
+ * (`SKIP_BUTTON_SECONDS` in PlayerControls): arrows nudge, buttons jump.
+ */
+export const KEYBOARD_SKIP_SECONDS = 10;
+
+/**
  * Registers keyboard shortcuts for the video player.
  * Space/K = play/pause, F = fullscreen, M = mute, C = toggle captions,
- * P = picture-in-picture, ArrowLeft/Right = seek ±10s, ArrowUp/Down = volume ±5%.
+ * P = picture-in-picture, ArrowLeft/Right = seek ±KEYBOARD_SKIP_SECONDS,
+ * ArrowUp/Down = volume ±5%.
  */
 export function useKeyboardShortcuts(
   videoRef: React.RefObject<HTMLVideoElement | null>,
@@ -90,12 +97,12 @@ export function useKeyboardShortcuts(
 
         case "ArrowLeft":
           e.preventDefault();
-          handleSeek(Math.max(0, video.currentTime - 10));
+          handleSeek(Math.max(0, video.currentTime - KEYBOARD_SKIP_SECONDS));
           break;
 
         case "ArrowRight":
           e.preventDefault();
-          handleSeek(Math.min(video.duration || 0, video.currentTime + 10));
+          handleSeek(Math.min(video.duration || 0, video.currentTime + KEYBOARD_SKIP_SECONDS));
           break;
 
         case "ArrowUp":

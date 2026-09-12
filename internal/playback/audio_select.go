@@ -124,20 +124,59 @@ func MatchAudioTrackAcrossVersions(
 	}
 
 	selected := requestedTracks[requestedIndex]
+	signature := AudioTrackSignatureFromTrack(selected)
+	// A signature match is language-independent and authoritative: the same
+	// track on another encode keeps its identity even if the language list is
+	// ordered differently.
+	if idx := findExactAudioTrack(effectiveTracks, signature); idx >= 0 {
+		return idx
+	}
 	// A MULTi/undetermined track's primary Language is "mul"/"und" and matches
-	// nothing; fall back to the first concrete code in its Languages list so the
-	// cross-version language match can still find a counterpart.
-	lang := selected.Language
-	if lang == "" || lang == "und" || lang == "mul" {
-		if len(selected.Languages) > 0 {
-			lang = selected.Languages[0]
+	// nothing; it carries several concrete languages instead. Try every
+	// language the requested track carries, in order, before falling back to
+	// the effective file's default. Reducing to a single code (the old
+	// Languages[0] behavior) degraded to default whenever that one language was
+	// absent even though a later one was present.
+	for _, code := range crossVersionAudioLanguages(selected) {
+		candidate := SelectAudioTrack(effectiveTracks, "", &AudioTrackPreference{
+			AudioTrackIndex: requestedIndex,
+			AudioLanguage:   code,
+			TrackSignature:  signature,
+		})
+		if trackHasLanguage(effectiveTracks[candidate], code) {
+			return candidate
 		}
 	}
-	return SelectAudioTrack(effectiveTracks, "", &AudioTrackPreference{
-		AudioTrackIndex: requestedIndex,
-		AudioLanguage:   lang,
-		TrackSignature:  AudioTrackSignatureFromTrack(selected),
-	})
+	// No carried language resolved on the target; keep the previous
+	// default/first-track fallback.
+	return SelectAudioTrack(effectiveTracks, "", nil)
+}
+
+// crossVersionAudioLanguages returns the concrete languages a track carries,
+// primary code first, then its MULTi language list, deduplicated by canonical
+// form. The "und"/"mul" sentinels are placeholders and are skipped.
+func crossVersionAudioLanguages(track models.AudioTrack) []string {
+	codes := make([]string, 0, len(track.Languages)+1)
+	primary := track.Language
+	if primary != "" && primary != "und" && primary != "mul" {
+		codes = append(codes, primary)
+	}
+	for _, code := range track.Languages {
+		if code == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range codes {
+			if langMatch(existing, code) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			codes = append(codes, code)
+		}
+	}
+	return codes
 }
 
 // BrowserSupportsAudioCodec returns true if the given audio codec can be

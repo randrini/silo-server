@@ -1208,6 +1208,18 @@ func NewRouter(deps Dependencies) chi.Router {
 			// virtual candidate is bad, not that the transport should keep
 			// rebuilding. Stamp the effective row known-bad (CAS-fenced on its
 			// file_path) so the next failure recovery rotates candidates.
+			//
+			// This callback is wired only for the integrated/local executor
+			// (TranscodeManager.OnDemuxFailure, forwarded in
+			// playback_transport.go). A remote transcode node runs its own
+			// ffmpeg and returns only manifest/segment bytes to this process:
+			// its stderr is captured by the node's own log sink
+			// (transcodenode.Server.SetFFmpegLogSink) and never reaches the
+			// server, so the same bad source selected on a node is not stamped
+			// and the session can loop rebuilding it. Closing that gap needs
+			// node-side work to detect the repeated demux failure and report
+			// the candidate identity; there is deliberately no stderr
+			// forwarding protocol invented here.
 			playbackHandler.TranscodeManager().OnDemuxFailure = func(ctx context.Context, fileID int, expectedFilePath string) error {
 				if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(expectedFilePath)), "virtual://") {
 					return nil

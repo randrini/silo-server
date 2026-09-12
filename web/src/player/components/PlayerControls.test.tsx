@@ -147,6 +147,17 @@ describe("PlayerControls", () => {
     expect(screen.getByRole("button", { name: "Edit markers" })).toBeInTheDocument();
   });
 
+  it("uses a 30s jump for both on-screen skip buttons", () => {
+    const onSeek = vi.fn();
+    renderControls(false, { currentTime: 100, duration: 300, onSeek });
+
+    fireEvent.click(screen.getByRole("button", { name: "Back 30 seconds" }));
+    expect(onSeek).toHaveBeenCalledWith(70);
+
+    fireEvent.click(screen.getByRole("button", { name: "Forward 30 seconds" }));
+    expect(onSeek).toHaveBeenCalledWith(130);
+  });
+
   it("uses the mobile transport and hides hardware-volume controls on coarse pointers", () => {
     vi.stubGlobal(
       "matchMedia",

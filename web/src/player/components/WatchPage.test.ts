@@ -413,8 +413,10 @@ describe("WatchPage version switch feedback", () => {
 });
 
 describe("WatchPage virtual version substitution notice", () => {
-  const notice =
+  const genericNotice =
     "Playing a different version than selected — the requested version isn't playable on this device.";
+  const labeledNotice =
+    "The selected version wasn't available, so Silo is playing 1080p H264 instead.";
   const virtualRow: PlayerFileVersion = {
     ...version,
     file_id: 100,
@@ -427,7 +429,7 @@ describe("WatchPage virtual version substitution notice", () => {
     file_path: "/media/Movies/Example (2024)/Example.1080p.mkv",
   };
 
-  it("fires when the resolved virtual candidate differs from the requested row's path", () => {
+  it("names the effective version when the resolved virtual candidate is known", () => {
     const effectiveVirtualUri = candidateRow.file_path;
     playbackSessionMock.mockReturnValue(
       playbackSession({
@@ -443,7 +445,27 @@ describe("WatchPage virtual version substitution notice", () => {
 
     render(createElement(WatchPage, { ...watchPageProps, versions: [virtualRow, candidateRow] }));
 
-    expect(screen.getByText(notice)).toBeInTheDocument();
+    expect(screen.getByText(labeledNotice)).toBeInTheDocument();
+    expect(screen.queryByText(genericNotice)).not.toBeInTheDocument();
+  });
+
+  it("falls back to generic copy when the effective virtual candidate is unknown", () => {
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 100,
+        effectiveVirtualUri: "/media/Movies/Example (2024)/Uncatalogued.mkv",
+        plan: fixturePlanV3({
+          requested_media_file_id: 100,
+          effective_media_file_id: 100,
+          effective_virtual_uri: "/media/Movies/Example (2024)/Uncatalogued.mkv",
+        }),
+      }),
+    );
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualRow, candidateRow] }));
+
+    expect(screen.getByText(genericNotice)).toBeInTheDocument();
+    expect(screen.queryByText(labeledNotice)).not.toBeInTheDocument();
   });
 
   it("stays quiet when the requested row is the effective virtual candidate", () => {
@@ -462,7 +484,8 @@ describe("WatchPage virtual version substitution notice", () => {
 
     render(createElement(WatchPage, { ...watchPageProps, versions: [virtualRow, candidateRow] }));
 
-    expect(screen.queryByText(notice)).not.toBeInTheDocument();
+    expect(screen.queryByText(labeledNotice)).not.toBeInTheDocument();
+    expect(screen.queryByText(genericNotice)).not.toBeInTheDocument();
   });
 
   it("does not fire for an explicit selection even when the virtual candidate differs", () => {
@@ -487,7 +510,8 @@ describe("WatchPage virtual version substitution notice", () => {
       }),
     );
 
-    expect(screen.queryByText(notice)).not.toBeInTheDocument();
+    expect(screen.queryByText(labeledNotice)).not.toBeInTheDocument();
+    expect(screen.queryByText(genericNotice)).not.toBeInTheDocument();
   });
 });
 
