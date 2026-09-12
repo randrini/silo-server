@@ -565,10 +565,48 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 	attemptCtx, cancel := context.WithTimeout(r.Context(), virtualStartupBudget)
 	defer cancel()
 
+	// persistedResultURI is true when the catalog row already points at an
+	// adopted provider-neutral candidate rather than the neutral virtual path.
+	persistedResultURI := parsed != nil && strings.TrimSpace(parsed.Query().Get("result")) != ""
+
+	// fastPathHit records that resolveAndProbe returned the repeat-play fast
+	// path so the candidate loop can return it immediately instead of treating
+	// a deferred (ProbeSucceeded=false) pinned result as a failed candidate.
+	fastPathHit := false
+
 	resolveAndProbe := func(i int, cand VirtualPlaybackStream) (*resolvedVirtualPlaybackSource, error) {
 		oid := cand.OwnerInstallationID
 		if oid <= 0 {
 			oid = file.VirtualOwnerInstallationID
+		}
+		// Repeat-play fast path. When the requested row already owns a pinned
+		// or adopted provider-neutral candidate, complete probed evidence, and
+		// a probe stamp, the start path does not need the provider URL: the
+		// stream relay re-resolves at serve time and owns first-byte failover
+		// (see stream.go and playback_transport.go), so a replay costs DB +
+		// tokens only. Gated on the deferred start branch; the synchronous
+		// replan/alternate/stale-fallback callers (deferProbe=false) still
+		// resolve because they need probed track inventory to remap selections.
+		if deferProbe && !forceRelist && !noResult && h.VirtualMediaDetailedResolver != nil &&
+			(persistedResultURI || pinnedURI != "") &&
+			file.ProbeUpdatedAt != nil &&
+			completeVirtualVideoEvidenceV3(file) &&
+			completeVirtualAudioEvidenceV3(file) &&
+			completeVirtualContainerEvidenceV3(file) {
+			fastPathHit = true
+			transient := *file
+			transient.FilePath = cand.URI
+			transient.VirtualOwnerInstallationID = oid
+			h.pinVirtualSticky(stickyKey, cand.URI)
+			mergeVirtualCandidateTracks(&transient, cand)
+			if !transient.HDR && cand.HDR != "" {
+				transient.HDR = true
+			}
+			h.maybeTriggerSubtitleSearch(attemptCtx, &transient, cand)
+			return &resolvedVirtualPlaybackSource{
+				URL: "", URI: cand.URI, OwnerID: oid, File: &transient,
+				ProbeSucceeded: false, Provenance: ProbeProvenancePending,
+			}, nil
 		}
 		var streamURL string
 		var resolveErr error
@@ -810,6 +848,14 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 	var attemptErr error
 	for i, candidate := range candidates {
 		result, err := resolveAndProbe(i, candidate)
+		if fastPathHit {
+			// The repeat-play fast path already committed the persisted
+			// candidate; return it without re-ranking or unpinning the pin.
+			if result == nil {
+				return resolvedVirtualPlaybackSource{}, errors.New("virtual playback fast path returned no source")
+			}
+			return *result, nil
+		}
 		if err != nil || (!result.ProbeSucceeded && candidate.URI == pinnedURI) {
 			if candidate.URI == pinnedURI && h != nil {
 				// The pinned source stopped working; release it so the next

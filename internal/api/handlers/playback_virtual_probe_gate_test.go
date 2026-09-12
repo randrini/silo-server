@@ -335,6 +335,161 @@ func TestVirtualProbeFailureCacheClearsMarker(t *testing.T) {
 	}
 }
 
+// virtualRepeatPlayFile is a virtual row that already carries a probe stamp and
+// complete probed evidence: the state the repeat-play fast path recognizes.
+func virtualRepeatPlayFile(path string) *models.MediaFile {
+	probedAt := time.Now().Add(-time.Hour)
+	return &models.MediaFile{
+		ID:                         700,
+		ContentID:                  "movie-repeat",
+		FilePath:                   path,
+		Container:                  "mkv",
+		CodecVideo:                 "h264",
+		CodecAudio:                 "aac",
+		Resolution:                 "1080p",
+		ProbeUpdatedAt:             &probedAt,
+		VirtualOwnerInstallationID: 5,
+		VideoTracks:                []models.VideoTrack{{Codec: "h264", Width: 1920, Height: 1080, FrameRate: "24"}},
+		AudioTracks:                []models.AudioTrack{{Codec: "aac", Channels: 2, Language: "eng"}},
+	}
+}
+
+// virtualRepeatPlayHandler wires detailed- and legacy-resolver spies. detailed
+// counts every ResolveVirtualMediaDetailed invocation; the repeat-play fast
+// path must leave it at zero on a replay. The legacy resolver is present only
+// because resolveVirtualPlaybackSource requires one to be configured; the
+// detailed resolver always takes precedence when both are set.
+func virtualRepeatPlayHandler(detailedCalls, legacyCalls *int) *PlaybackHandler {
+	return &PlaybackHandler{
+		VirtualPlaybackResolver: VirtualPlaybackResolverFunc(
+			func(_ context.Context, path string, _ int, _ string, _ int) (string, error) {
+				*legacyCalls++
+				return "http://provider.example/legacy?path=" + path, nil
+			}),
+		VirtualMediaDetailedResolver: VirtualMediaDetailedResolverFunc(
+			func(_ context.Context, virtualURI string, _ int, _ int, _ string, _ bool, _ []string, _ string) (ResolvedVirtualMedia, error) {
+				*detailedCalls++
+				return ResolvedVirtualMedia{URL: "http://provider.example/stream.mkv", URI: virtualURI}, nil
+			}),
+	}
+}
+
+// A replay of a virtual row that already owns an adopted result= candidate,
+// complete evidence, and a probe stamp must not call the provider resolver:
+// the serve relay re-resolves and owns failover, so the start path only needs
+// the persisted URI.
+func TestResolveVirtualRepeatPlaySkipsProviderResolve(t *testing.T) {
+	detailedCalls, legacyCalls := 0, 0
+	h := virtualRepeatPlayHandler(&detailedCalls, &legacyCalls)
+	file := virtualRepeatPlayFile("virtual://movie/tt-repeat?result=cand-1")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", true, nil, "", "", 0, false)
+	if err != nil {
+		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+	}
+	if detailedCalls != 0 || legacyCalls != 0 {
+		t.Fatalf("resolvers called detailed=%d legacy=%d, want 0/0 on a repeat play", detailedCalls, legacyCalls)
+	}
+	if resolved.URL != "" {
+		t.Fatalf("resolved URL = %q, want empty (serve relay owns resolution)", resolved.URL)
+	}
+	if resolved.URI != file.FilePath {
+		t.Fatalf("resolved URI = %q, want persisted %q", resolved.URI, file.FilePath)
+	}
+	if resolved.Provenance != ProbeProvenancePending || resolved.ProbeSucceeded {
+		t.Fatalf("provenance=%q succeeded=%v, want pending/false", resolved.Provenance, resolved.ProbeSucceeded)
+	}
+	if resolved.File == nil || resolved.File.FilePath != file.FilePath {
+		t.Fatalf("resolved file = %#v, want persisted candidate", resolved.File)
+	}
+}
+
+// A sticky pin plus a best-result cache hit clears noResult; the repeat-play
+// fast path must then skip the resolver while returning the pinned URI.
+func TestResolveVirtualRepeatPlaySkipsProviderResolveWithStickyPin(t *testing.T) {
+	detailedCalls, legacyCalls := 0, 0
+	h := virtualRepeatPlayHandler(&detailedCalls, &legacyCalls)
+	h.BestResultCache = NewVirtualBestResultCache(time.Hour, 16)
+
+	file := virtualRepeatPlayFile("virtual://movie/tt-repeat-pin")
+	pinned := "virtual://movie/tt-repeat-pin?result=cand-9"
+	neutral := virtualPlaybackNeutralKey(file.FilePath)
+	stickyKey := bestResultCacheKey(file.ContentID, neutral, file.VirtualOwnerInstallationID, "")
+	h.pinVirtualSticky(stickyKey, pinned)
+	h.BestResultCache.set(bestResultCacheKey(file.ContentID, neutral, file.VirtualOwnerInstallationID, ""), []VirtualPlaybackStream{{
+		URI: pinned, Resolution: "1080p", CodecVideo: "h264", CodecAudio: "aac", Container: "mkv",
+	}}, time.Now())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+	resolved, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", true, nil, "", "", 0, false)
+	if err != nil {
+		t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+	}
+	if detailedCalls != 0 || legacyCalls != 0 {
+		t.Fatalf("resolvers called detailed=%d legacy=%d, want 0/0 for a pinned candidate", detailedCalls, legacyCalls)
+	}
+	if resolved.URI != pinned {
+		t.Fatalf("resolved URI = %q, want pinned %q", resolved.URI, pinned)
+	}
+}
+
+// The fast path is start-only. forceRelist (explicit re-selection), noResult
+// (neutral row with no adopted pick), incomplete evidence, and a missing probe
+// stamp must all keep resolving synchronously.
+func TestResolveVirtualRepeatPlayStillResolvesWhenRequired(t *testing.T) {
+	cases := []struct {
+		name        string
+		path        string
+		deferProbe  bool
+		forceRelist bool
+		mutate      func(*models.MediaFile)
+		wantCalls   int
+	}{
+		{
+			name: "forceRelist", path: "virtual://movie/tt-repeat?result=cand-1",
+			deferProbe: true, forceRelist: true, wantCalls: 1,
+		},
+		{
+			name: "noResult", path: "virtual://movie/tt-repeat",
+			deferProbe: true, wantCalls: 1,
+		},
+		{
+			name: "evidenceIncomplete", path: "virtual://movie/tt-repeat?result=cand-1",
+			deferProbe: true, mutate: func(f *models.MediaFile) { f.AudioTracks = nil }, wantCalls: 1,
+		},
+		{
+			name: "probeMissing", path: "virtual://movie/tt-repeat?result=cand-1",
+			deferProbe: true, mutate: func(f *models.MediaFile) { f.ProbeUpdatedAt = nil }, wantCalls: 1,
+		},
+		{
+			name: "synchronousDeferProbeFalse", path: "virtual://movie/tt-repeat?result=cand-1",
+			deferProbe: false, wantCalls: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detailedCalls, legacyCalls := 0, 0
+			h := virtualRepeatPlayHandler(&detailedCalls, &legacyCalls)
+			file := virtualRepeatPlayFile(tc.path)
+			if tc.mutate != nil {
+				tc.mutate(file)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/playback/start", nil)
+			if _, err := h.resolveVirtualPlaybackSource(req, file, "profile-1", tc.deferProbe, nil, "", "", 0, tc.forceRelist); err != nil {
+				t.Fatalf("resolveVirtualPlaybackSource error: %v", err)
+			}
+			if detailedCalls != tc.wantCalls {
+				t.Fatalf("detailed resolver called %d times, want %d", detailedCalls, tc.wantCalls)
+			}
+			if legacyCalls != 0 {
+				t.Fatalf("legacy resolver called %d times, want 0", legacyCalls)
+			}
+		})
+	}
+}
+
 // The damper backs off exponentially: each consecutive failure for the same
 // key doubles the window, capped at virtualProbeFailureMaxTTL. The stored
 // expiry must be derived from the injected clock, not the wall clock.
