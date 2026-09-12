@@ -640,6 +640,11 @@ export function VideoPlayer({
             (v.file_id === pendingSwitchFileId && v.file_id !== effectiveFileId) ||
             (v.file_id === plan.requested_media_file_id && v.file_id !== effectiveFileId),
           failed: v.failed,
+          // The catalog's liveness flag is not part of `PlayerFileVersion`, but
+          // the watch-detail rows VideoPlayer receives carry it. Surface it so a
+          // version the media page hides as "Unavailable" is not selectable here
+          // with no warning.
+          unavailable: (v as PlayerFileVersion & { available?: boolean }).available === false,
         };
       }),
     [versions, effectiveFileId, plan.requested_media_file_id, pendingSwitchFileId],

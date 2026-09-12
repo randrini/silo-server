@@ -404,6 +404,85 @@ describe("WatchPage version switch feedback", () => {
   });
 });
 
+describe("WatchPage virtual version substitution notice", () => {
+  const notice =
+    "Playing a different version than selected — the requested version isn't playable on this device.";
+  const virtualRow: PlayerFileVersion = {
+    ...version,
+    file_id: 100,
+    container: "virtual",
+    file_path: "virtual://movie/tt1?result=all",
+  };
+  const candidateRow: PlayerFileVersion = {
+    ...version,
+    file_id: 7,
+    file_path: "/media/Movies/Example (2024)/Example.1080p.mkv",
+  };
+
+  it("fires when the resolved virtual candidate differs from the requested row's path", () => {
+    const effectiveVirtualUri = candidateRow.file_path;
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 100,
+        effectiveVirtualUri: effectiveVirtualUri ?? null,
+        plan: fixturePlanV3({
+          requested_media_file_id: 100,
+          effective_media_file_id: 100,
+          effective_virtual_uri: effectiveVirtualUri,
+        }),
+      }),
+    );
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualRow, candidateRow] }));
+
+    expect(screen.getByText(notice)).toBeInTheDocument();
+  });
+
+  it("stays quiet when the requested row is the effective virtual candidate", () => {
+    const effectiveVirtualUri = candidateRow.file_path;
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 7,
+        effectiveVirtualUri: effectiveVirtualUri ?? null,
+        plan: fixturePlanV3({
+          requested_media_file_id: 7,
+          effective_media_file_id: 7,
+          effective_virtual_uri: effectiveVirtualUri,
+        }),
+      }),
+    );
+
+    render(createElement(WatchPage, { ...watchPageProps, versions: [virtualRow, candidateRow] }));
+
+    expect(screen.queryByText(notice)).not.toBeInTheDocument();
+  });
+
+  it("does not fire for an explicit selection even when the virtual candidate differs", () => {
+    const effectiveVirtualUri = candidateRow.file_path;
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 100,
+        effectiveVirtualUri: effectiveVirtualUri ?? null,
+        plan: fixturePlanV3({
+          requested_media_file_id: 100,
+          effective_media_file_id: 100,
+          effective_virtual_uri: effectiveVirtualUri,
+        }),
+      }),
+    );
+
+    render(
+      createElement(WatchPage, {
+        ...watchPageProps,
+        versions: [virtualRow, candidateRow],
+        explicitFileSelection: true,
+      }),
+    );
+
+    expect(screen.queryByText(notice)).not.toBeInTheDocument();
+  });
+});
+
 describe("WatchPage effective virtual version", () => {
   it("selects the path-matched candidate when the session's id is the VIRTUAL row", () => {
     const virtualRow: PlayerFileVersion = {
@@ -499,6 +578,93 @@ describe("WatchPage live inventory refresh", () => {
     const playerCalls = videoPlayerMock.mock.calls;
     const playerProps = playerCalls[playerCalls.length - 1]?.[0] as { streamUrl?: string };
     expect(playerProps.streamUrl).toBe("/stream/session-1");
+  });
+
+  it("reads the effective virtual candidate's inventory when the id names the collapsed row", async () => {
+    const applyAudioInventory = vi.fn();
+    const refreshSubtitles = vi.fn();
+    // The session targets the collapsed VIRTUAL row (id 7); probes persist to
+    // the resolved candidate row (id 8), which the plan identifies by path.
+    const collapsedVirtualVersion: PlayerFileVersion = {
+      ...virtualVersion,
+      file_id: 7,
+      file_path: "virtual://movie/tt1?result=all",
+    };
+    const candidateVersion: PlayerFileVersion = {
+      ...virtualVersion,
+      file_id: 8,
+      file_path: "/media/Movies/Example (2024)/Example.1080p.mkv",
+    };
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 7,
+        effectiveVirtualUri: candidateVersion.file_path ?? null,
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [],
+        applyAudioInventory,
+        refreshSubtitles,
+      }),
+    );
+    // The collapsed row carries no probe inventory; only the candidate does.
+    fetchWatchDetailMock.mockResolvedValue({
+      versions: [
+        collapsedVirtualVersion,
+        {
+          ...candidateVersion,
+          audio_tracks: richerAudioTracks,
+          subtitle_tracks: [{ index: 13, language: "en", codec: "pgs", title: "English" }],
+        },
+      ],
+    });
+
+    render(
+      createElement(WatchPage, {
+        ...watchPageProps,
+        versions: [collapsedVirtualVersion, candidateVersion],
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INVENTORY_REFRESH_INTERVAL_MS);
+    });
+
+    expect(applyAudioInventory).toHaveBeenCalledWith(richerAudioTracks);
+    expect(refreshSubtitles).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the collapsed id when the plan publishes no effective virtual URI", async () => {
+    const applyAudioInventory = vi.fn();
+    const collapsedVersion: PlayerFileVersion = {
+      ...virtualVersion,
+      file_id: 7,
+      audio_tracks: richerAudioTracks,
+    };
+    const otherVersion: PlayerFileVersion = {
+      ...virtualVersion,
+      file_id: 8,
+      file_path: "/media/Movies/Example (2024)/Example.2160p.mkv",
+      audio_tracks: [],
+    };
+    playbackSessionMock.mockReturnValue(
+      playbackSession({
+        mediaFileId: 7,
+        effectiveVirtualUri: null,
+        planAudioTracks: [{ codec: "eac3", channels: 6, layout: "5.1", language: "eng" }],
+        subtitleUrls: [planSubtitle],
+        applyAudioInventory,
+      }),
+    );
+    fetchWatchDetailMock.mockResolvedValue({ versions: [collapsedVersion, otherVersion] });
+
+    render(
+      createElement(WatchPage, { ...watchPageProps, versions: [collapsedVersion, otherVersion] }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(INVENTORY_REFRESH_INTERVAL_MS);
+    });
+
+    expect(applyAudioInventory).toHaveBeenCalledWith(richerAudioTracks);
   });
 
   it("does not poll a local file or a complete inventory", async () => {

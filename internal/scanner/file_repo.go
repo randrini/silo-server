@@ -2495,19 +2495,61 @@ func (r *FileRepository) GetByPath(ctx context.Context, path string) (*models.Me
 	return scanMediaFile(r.pool.QueryRow(ctx, query, path))
 }
 
+// virtualNeutralLikePrefix builds a left-anchored LIKE pattern covering every
+// stored path for a neutral virtual key. The neutral key's query string is
+// dropped: a provider candidate URI may carry result= in any parameter
+// position, so only the scheme/host/path is guaranteed to prefix it. The
+// prefix is escaped with the backslash escape character declared by the caller
+// so a literal %, _ or \ in the path cannot widen the match.
+func virtualNeutralLikePrefix(neutralPath string) string {
+	base := neutralPath
+	if i := strings.IndexByte(base, '?'); i >= 0 {
+		base = base[:i]
+	}
+	var b strings.Builder
+	b.Grow(len(base) + 1)
+	for i := 0; i < len(base); i++ {
+		switch c := base[i]; c {
+		case '\\', '%', '_':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('%')
+	return b.String()
+}
+
 // GetVirtualCandidateByNeutralPath retrieves a virtual candidate while ignoring
-// the provider's rotating result selection.
+// the provider's rotating result selection. The stored path is matched with a
+// left-anchored LIKE so the lookup is sargable; the exact neutral key is then
+// confirmed in Go because a bare neutral key is also a prefix of sibling URIs
+// (for example a longer content id under the same scheme/host/path).
 func (r *FileRepository) GetVirtualCandidateByNeutralPath(ctx context.Context, neutralPath, contentID, episodeID string, ownerInstallationID int) (*models.MediaFile, error) {
 	query := `SELECT ` + fileColumns + `
 		FROM media_files
 		WHERE virtual_owner_installation_id = $1
 		  AND content_id = $2
 		  AND COALESCE(episode_id, '') = COALESCE($3, '')
-		  AND regexp_replace(regexp_replace(file_path, '[?&]result=[^&]*', '', 'g'), '[?&]$', '') = $4
+		  AND file_path LIKE $4 ESCAPE '\'
 		  AND missing_since IS NULL
-		ORDER BY id
-		LIMIT 1`
-	return scanMediaFile(r.pool.QueryRow(ctx, query, ownerInstallationID, contentID, episodeID, neutralPath))
+		ORDER BY id`
+	rows, err := r.pool.Query(ctx, query, ownerInstallationID, contentID, episodeID, virtualNeutralLikePrefix(neutralPath))
+	if err != nil {
+		return nil, fmt.Errorf("querying virtual candidate by neutral path: %w", err)
+	}
+	defer rows.Close()
+	files, err := scanMediaFiles(rows)
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range files {
+		if stripVirtualResultParam(file.FilePath) == neutralPath {
+			return file, nil
+		}
+	}
+	return nil, ErrFileNotFound
 }
 
 // IsActivePath reports whether path is the exact logical path of a media file

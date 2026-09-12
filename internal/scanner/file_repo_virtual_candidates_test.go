@@ -396,6 +396,88 @@ func TestReplaceVirtualResultPin_PostgresCAS(t *testing.T) {
 	}
 }
 
+// TestGetVirtualCandidateByNeutralPath_ResultVariant exercises the
+// provider-neutral lookup used when re-resolving a stale virtual candidate. The
+// stored row carries a rotating result= pick; the lookup is called with the
+// neutral key (result stripped). Rows that merely share the scheme/host/path
+// prefix must not leak through the left-anchored LIKE.
+func TestGetVirtualCandidateByNeutralPath_ResultVariant(t *testing.T) {
+	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("SILO_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	suffix := time.Now().UnixNano()
+	contentID := fmt.Sprintf("virtual-neutral-lookup-%d", suffix)
+	neutral := fmt.Sprintf("virtual://series/tt%d/1/1?profile=1080p", suffix)
+	stored := neutral + "&result=abc"
+
+	var folderID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_folders(type,name,enabled)
+		VALUES('series',$1,true) RETURNING id`, fmt.Sprintf("Neutral Lookup %d", suffix)).Scan(&folderID); err != nil {
+		t.Fatalf("seed folder: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id=$1`, contentID)
+		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id=$1`, folderID)
+	})
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_items(content_id,type,title,status,genres)
+		VALUES($1,'series','Neutral Lookup','matched','{}'::text[])`, contentID); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+
+	const ownerID = 5
+	seed := func(path string) int {
+		var id int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files(content_id,media_folder_id,file_path,file_size,container,virtual_owner_installation_id,episode_id)
+			VALUES($1,$2,$3,0,'mkv',$4,NULL) RETURNING id`,
+			contentID, folderID, path, ownerID).Scan(&id); err != nil {
+			t.Fatalf("seed virtual file %q: %v", path, err)
+		}
+		return id
+	}
+
+	wantID := seed(stored)
+	// Same item and profile but a nested path that shares the neutral prefix:
+	// "virtual://series/tt.../1/1" prefixes "virtual://series/tt.../1/10".
+	seed(fmt.Sprintf("virtual://series/tt%d/1/10?profile=1080p&result=def", suffix))
+	// Same path but a different quality profile.
+	seed(fmt.Sprintf("virtual://series/tt%d/1/1?profile=720p&result=ghi", suffix))
+
+	repo := NewFileRepository(pool)
+	got, err := repo.GetVirtualCandidateByNeutralPath(ctx, neutral, contentID, "", ownerID)
+	if err != nil {
+		t.Fatalf("GetVirtualCandidateByNeutralPath: %v", err)
+	}
+	if got == nil || got.ID != wantID {
+		t.Fatalf("GetVirtualCandidateByNeutralPath returned %+v, want id %d", got, wantID)
+	}
+	if got.FilePath != stored {
+		t.Fatalf("returned path %q, want %q", got.FilePath, stored)
+	}
+
+	// A bare neutral key matches the result-only pin and nothing else.
+	bareNeutral := fmt.Sprintf("virtual://movie/tt%d", suffix)
+	bareID := seed(bareNeutral + "?result=xyz")
+	gotBare, err := repo.GetVirtualCandidateByNeutralPath(ctx, bareNeutral, contentID, "", ownerID)
+	if err != nil {
+		t.Fatalf("GetVirtualCandidateByNeutralPath (bare): %v", err)
+	}
+	if gotBare == nil || gotBare.ID != bareID {
+		t.Fatalf("bare lookup returned %+v, want id %d", gotBare, bareID)
+	}
+}
+
 func TestReplaceVirtualResultPin_CollisionUnpinsInsteadOfErroring(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {

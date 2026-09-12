@@ -11,6 +11,9 @@ export interface VersionInfo {
   isCurrentSource: boolean;
   isRequestedSource: boolean;
   failed?: boolean;
+  /** The catalog currently reports this version's source as gone. It stays
+   *  selectable because a play can force a re-link and retry it. */
+  unavailable?: boolean;
 }
 
 interface QualityMenuProps {
@@ -164,7 +167,9 @@ export function QualityMenu({
                               className={`rounded border border-white/15 px-1.5 py-0.5 text-[10px] leading-none ${
                                 status === "Failed"
                                   ? "border-red-500/30 bg-red-500/20 text-red-400"
-                                  : "bg-white/10 text-white/70"
+                                  : status === "Will retry on play"
+                                    ? "border-amber-500/30 bg-amber-500/15 text-amber-400"
+                                    : "bg-white/10 text-white/70"
                               }`}
                             >
                               {status}
@@ -218,19 +223,18 @@ export function QualityMenu({
 }
 
 export function buildVersionStatusLabels(version: VersionInfo): string[] {
-  if (version.isCurrentSource && version.isRequestedSource) {
-    return ["Playing"];
-  }
-
   const labels: string[] = [];
   if (version.isCurrentSource) {
     labels.push("Playing");
   }
-  if (version.isRequestedSource) {
+  if (version.isRequestedSource && !version.isCurrentSource) {
     labels.push("Requested");
   }
   if (version.failed) {
     labels.push("Failed");
+  }
+  if (version.unavailable) {
+    labels.push("Will retry on play");
   }
   return labels;
 }

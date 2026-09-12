@@ -1458,6 +1458,17 @@ describe("VideoPlayer version switch UX", () => {
     expect(props.versions?.find((v) => v.fileId === 99)?.isCurrentSource).toBe(false);
   });
 
+  it("flags a version the catalog reports unavailable so the menu can warn", () => {
+    const unavailableVersion = { ...versionB, available: false };
+    renderPlayer({ versions: [versionA, unavailableVersion], activeFileId: 7 });
+
+    const props = controls.current as unknown as {
+      versions?: Array<{ fileId: number; unavailable?: boolean }>;
+    };
+    expect(props.versions?.find((v) => v.fileId === 99)?.unavailable).toBe(true);
+    expect(props.versions?.find((v) => v.fileId === 7)?.unavailable).toBe(false);
+  });
+
   it("shows the quality ellipsis only for quality replans, not track changes", async () => {
     const { rerenderPlayer } = renderPlayer({});
 

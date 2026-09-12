@@ -264,7 +264,14 @@ export function WatchPage({
         if (current.mediaFileId !== mediaFileId || current.sessionId !== sessionId) {
           return;
         }
-        const version = detail.versions.find((candidate) => candidate.file_id === mediaFileId);
+        // Probe metadata is persisted to the effective candidate row, not the
+        // collapsed virtual row the session id names, so resolve the target the
+        // same way the menus do: effective virtual URI first, collapsed id as
+        // the fallback for ordinary files and older plans.
+        const version = resolveEffectiveVersion(detail.versions, {
+          mediaFileId,
+          effectiveVirtualUri: current.effectiveVirtualUri,
+        });
         if (version) {
           const nextAudioTracks = version.audio_tracks ?? [];
           if (nextAudioTracks.length > current.planAudioTracks.length) {
@@ -588,12 +595,26 @@ export function WatchPage({
   // The server may substitute a different version (e.g. HDR→SDR) when the
   // requested one is not playable on this device. Only the auto path allows
   // that, so surface a dismissible notice when it happened.
+  //
+  // A virtual requested row defeats the id comparison: the server collapses
+  // `effective_media_file_id` onto the requested id and publishes the concrete
+  // candidate as `effective_virtual_uri` instead. There the substitution is
+  // visible only by comparing the published candidate's path against the
+  // requested row's own path. When the requested row carries no path (older
+  // responses) the comparison says nothing, so the notice stays quiet rather
+  // than guess.
   const plan = session.plan;
+  const requestedVersion =
+    plan && playbackVersions.find((v) => v.file_id === plan.requested_media_file_id);
+  const virtualSubstitution =
+    !!plan?.effective_virtual_uri &&
+    requestedVersion?.file_path !== undefined &&
+    requestedVersion.file_path !== plan.effective_virtual_uri;
+  const versionWasSubstituted =
+    !!plan &&
+    (plan.requested_media_file_id !== plan.effective_media_file_id || virtualSubstitution);
   const versionSwapNotice =
-    plan &&
-    plan.requested_media_file_id !== plan.effective_media_file_id &&
-    !explicitFileSelection &&
-    !versionSwapNoticeDismissed ? (
+    versionWasSubstituted && !explicitFileSelection && !versionSwapNoticeDismissed ? (
       <div className="absolute top-[max(4.5rem,calc(env(safe-area-inset-top)+3.5rem))] left-1/2 z-50 -translate-x-1/2">
         <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1.5 text-xs font-medium text-white/80 shadow-lg backdrop-blur">
           <span>
