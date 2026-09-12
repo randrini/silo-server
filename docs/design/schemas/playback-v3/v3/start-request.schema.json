@@ -73,6 +73,10 @@
     "subtitle_track_index": {
       "$ref": "#/$defs/track_index"
     },
+    "force_relink": {
+      "type": "boolean",
+      "description": "When true, the server re-queries the provider for a fresh virtual-source listing instead of trusting the cached or pinned candidate; clients set it only on explicit retries of unavailable versions or no-streams terminals."
+    },
     "metered": {
       "type": "boolean"
     },
