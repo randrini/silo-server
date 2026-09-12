@@ -6594,6 +6594,11 @@ func TestHandleReplanPlaybackV3SkipsRehydrationOfUnchangedVirtualCandidate(t *te
 	complete.ID = 500
 	complete.FilePath = "virtual://movie/tt-replan-skip?result=pinned"
 	complete.VirtualOwnerInstallationID = 5
+	// The row carries complete evidence, but only a real probe makes it an
+	// "already probed" row that may skip re-probing. Without the stamp the
+	// resolver must treat the inventory as unverified and probe it.
+	probedAt := time.Now().Add(-time.Hour)
+	complete.ProbeUpdatedAt = &probedAt
 	files := map[int]*models.MediaFile{complete.ID: complete}
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0), mapPlaybackFileResolver{files: files})
 	stubCopySeekAnchorV3(handler)

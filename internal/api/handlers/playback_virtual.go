@@ -35,7 +35,79 @@ const (
 	virtualProbeBudget                = 15 * time.Second
 	maxVirtualPlaybackPrefetchFiles   = 2
 	virtualPlaybackPrefetchBudget     = 20 * time.Second
+	// virtualProbeFailureTTL damps probe retry storms. A candidate that just
+	// consumed the whole virtualProbeBudget without producing usable metadata
+	// is not probed again for this long; the resolver falls through to the
+	// candidate-declared metadata instead. This is a short-lived damper, not a
+	// cache: a marker never suppresses a probe that previously succeeded.
+	virtualProbeFailureTTL = 5 * time.Minute
 )
+
+// virtualProbeFailureCache remembers the last failed probe per candidate so a
+// replan does not pay the probe budget again. It is package-level because the
+// handler is shared across requests and the marker is advisory: a mutex keeps
+// concurrent starts safe, and the small map is bounded by the live candidate
+// set (entries older than the TTL are dropped on read).
+type virtualProbeFailureCache struct {
+	mu    sync.Mutex
+	marks map[string]time.Time
+}
+
+func (c *virtualProbeFailureCache) recent(key string, now time.Time) bool {
+	if c == nil || key == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	at, ok := c.marks[key]
+	if !ok {
+		return false
+	}
+	if now.Sub(at) >= virtualProbeFailureTTL {
+		delete(c.marks, key)
+		return false
+	}
+	return true
+}
+
+func (c *virtualProbeFailureCache) mark(key string, now time.Time) {
+	if c == nil || key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.marks == nil {
+		c.marks = make(map[string]time.Time)
+	}
+	// Prune expired markers so a long-lived process only retains failures from
+	// the last TTL window.
+	for k, at := range c.marks {
+		if now.Sub(at) >= virtualProbeFailureTTL {
+			delete(c.marks, k)
+		}
+	}
+	c.marks[key] = now
+}
+
+func (c *virtualProbeFailureCache) clear(key string) {
+	if c == nil || key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.marks, key)
+}
+
+// virtualProbeFailures is the process-wide probe failure damper. Tests may
+// clear entries directly.
+var virtualProbeFailures = &virtualProbeFailureCache{marks: make(map[string]time.Time)}
+
+// virtualProbeFailureKey identifies a probe target across replans. The resolved
+// stream URL carries rotating credentials, so the candidate's provider-neutral
+// identity is the stable key.
+func virtualProbeFailureKey(candidateURI string) string {
+	return virtualPlaybackNeutralKey(candidateURI)
+}
 
 func (h *PlaybackHandler) PrefetchVirtualPlayback(ctx context.Context, files []*models.MediaFile, profileID string) {
 	if h == nil || h.VirtualPlaybackResolver == nil || len(files) == 0 || profileID == "" {
@@ -541,6 +613,13 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 		hasCompleteAudioEvidence := completeVirtualAudioEvidenceV3(&transient)
 		hasCompleteContainerEvidence := completeVirtualContainerEvidenceV3(&transient)
 		skipProbe := hasCompleteVideoEvidence && hasCompleteAudioEvidence && hasCompleteContainerEvidence
+		// A row that has never been probed carries NULL tracks and no probe
+		// stamp. Candidate-declared metadata can synthesize complete-looking
+		// evidence for the immediate plan, but it must not short-circuit the
+		// real probe that stamps the row and persists its true track inventory.
+		// Capture this before the candidate merge so a candidate-declared
+		// inventory never counts as stored evidence.
+		storedProbeMissing := transient.ProbeUpdatedAt == nil
 		if !skipProbe && cand.CodecVideo != "" && cand.Resolution != "" && cand.CodecAudio != "" && canSkipProbeForContainer(cand.Container) {
 			mergeVirtualCandidateTracks(&transient, cand)
 			if !transient.HDR && cand.HDR != "" {
@@ -551,7 +630,7 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 			hasCompleteContainerEvidence = completeVirtualContainerEvidenceV3(&transient)
 			skipProbe = hasCompleteVideoEvidence && hasCompleteAudioEvidence && hasCompleteContainerEvidence
 		}
-		if skipProbe {
+		if skipProbe && !storedProbeMissing {
 			h.pinVirtualSticky(stickyKey, cand.URI)
 			mergeVirtualCandidateTracks(&transient, cand)
 			if !transient.HDR && cand.HDR != "" {
@@ -570,6 +649,15 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 			}
 			h.maybeTriggerSubtitleSearch(attemptCtx, &transient, cand)
 			if h.VirtualPlaybackSourceProber != nil || h.VirtualPlaybackSourceProberWithHeaders != nil {
+				probeKey := virtualProbeFailureKey(cand.URI)
+				if virtualProbeFailures.recent(probeKey, time.Now()) {
+					// A fresh failure already consumed the probe budget; fall
+					// back to the candidate-declared metadata instead of paying
+					// it again on this replan.
+					return &resolvedVirtualPlaybackSource{
+						URL: streamURL, URI: cand.URI, OwnerID: oid, File: &transient, ProbeSucceeded: false, Provenance: ProbeProvenanceDeclared,
+					}, nil
+				}
 				targetID := file.ID
 				if transient.ID > 0 {
 					targetID = transient.ID
@@ -611,17 +699,20 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 					defer bgCancel()
 					probed, probeErr := h.probeVirtualSource(bgCtx, probeURL, &probeTransient, probeCand.RequestHeaders)
 					if probeErr != nil || probed == nil {
+						virtualProbeFailures.mark(probeKey, time.Now())
 						slog.WarnContext(bgCtx, "background virtual stream probe failed", "component", "api", "candidate_uri", probeCand.URI, "error", probeErr)
 						h.unpinVirtualSticky(stickyKey, probeCand.URI)
 						return
 					}
 					if !virtualRuntimePlausible(probed.Duration, expectedRuntimeMinutes) {
+						virtualProbeFailures.mark(probeKey, time.Now())
 						slog.WarnContext(bgCtx, "background virtual probe rejected: probed duration implausible",
 							"component", "api", "candidate_uri", probeCand.URI, "file_id", targetID,
 							"probed_duration_seconds", probed.Duration, "expected_runtime_minutes", expectedRuntimeMinutes)
 						h.unpinVirtualSticky(stickyKey, probeCand.URI)
 						return
 					}
+					virtualProbeFailures.clear(probeKey)
 					if probeTransient.ID > 0 {
 						probed.ID = probeTransient.ID
 						probed.MediaFolderID = probeTransient.MediaFolderID
@@ -647,11 +738,8 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 				URL: streamURL, URI: cand.URI, OwnerID: oid, File: &transient, ProbeSucceeded: false, Provenance: ProbeProvenanceDeclared,
 			}, nil
 		}
-		probeCtx, probeCancel := context.WithTimeout(attemptCtx, virtualProbeBudget)
-		probed, probeErr := h.probeVirtualSource(probeCtx, streamURL, &transient, cand.RequestHeaders)
-		probeCancel()
-		if probeErr != nil || probed == nil {
-			slog.DebugContext(r.Context(), "virtual stream probe timed out or failed; using candidate metadata", "component", "api", "candidate_uri", cand.URI, "error", probeErr)
+		probeKey := virtualProbeFailureKey(cand.URI)
+		declaredFallback := func() (*resolvedVirtualPlaybackSource, error) {
 			mergeVirtualCandidateTracks(&transient, cand)
 			if !transient.HDR && cand.HDR != "" {
 				transient.HDR = true
@@ -661,6 +749,20 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 				URL: streamURL, URI: cand.URI, OwnerID: oid, File: &transient, ProbeSucceeded: false, Provenance: ProbeProvenanceFailed,
 			}, nil
 		}
+		if virtualProbeFailures.recent(probeKey, time.Now()) {
+			// A recent probe failure already consumed the probe budget; use
+			// the candidate-declared metadata instead of paying it again.
+			return declaredFallback()
+		}
+		probeCtx, probeCancel := context.WithTimeout(attemptCtx, virtualProbeBudget)
+		probed, probeErr := h.probeVirtualSource(probeCtx, streamURL, &transient, cand.RequestHeaders)
+		probeCancel()
+		if probeErr != nil || probed == nil {
+			virtualProbeFailures.mark(probeKey, time.Now())
+			slog.DebugContext(r.Context(), "virtual stream probe timed out or failed; using candidate metadata", "component", "api", "candidate_uri", cand.URI, "error", probeErr)
+			return declaredFallback()
+		}
+		virtualProbeFailures.clear(probeKey)
 		if transient.ID > 0 {
 			probed.ID = transient.ID
 			probed.MediaFolderID = transient.MediaFolderID
@@ -767,6 +869,13 @@ func (h *PlaybackHandler) resolveVirtualPlaybackSource(r *http.Request, file *mo
 	}
 	return resolvedVirtualPlaybackSource{}, attemptErr
 }
+
+// VirtualFileMetadataUpdateSQL persists a probed virtual inventory back to
+// media_files. It also stamps probe_source/probe_updated_at so the playback
+// probe gate can recognize the row as really probed and stop re-probing it on
+// every start. virtual_collection rows keep their existing stamp: that source
+// is owned by the collection registration path, not playback.
+const VirtualFileMetadataUpdateSQL = `UPDATE media_files SET video_tracks=$1::jsonb, audio_tracks=$2::jsonb, subtitle_tracks=$3::jsonb, resolution=NULLIF($4,''), codec_video=NULLIF($5,''), codec_audio=NULLIF($6,''), container=NULLIF($7,''), hdr=$8, bitrate=NULLIF($9,0), duration=CASE WHEN $10 > 0 THEN $10 ELSE duration END, audio_channels=COALESCE((SELECT (elem->>'channels')::int FROM jsonb_array_elements(CASE WHEN jsonb_typeof($2::jsonb) = 'array' THEN $2::jsonb ELSE '[]'::jsonb END) elem LIMIT 1), audio_channels), probe_source=CASE WHEN media_files.probe_source='virtual_collection' THEN media_files.probe_source ELSE 'virtual' END, probe_updated_at=CASE WHEN media_files.probe_source='virtual_collection' THEN media_files.probe_updated_at ELSE now() END, updated_at=now() WHERE id=$11 AND (NULLIF($12, '') IS NULL OR file_path=$12)`
 
 func (h *PlaybackHandler) persistVirtualMetadataBounded(ctx context.Context, targetID int, expectedFilePath string, file *models.MediaFile) {
 	if h == nil || h.VirtualFileMetadataSaver == nil || file == nil || targetID <= 0 {

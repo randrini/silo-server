@@ -39,13 +39,19 @@ function normalizeLanguages(track: PlayerAudioTrack): string {
 
 /** Stable presentation identity for an audio track, excluding the container index. */
 function audioIdentity(track: PlayerAudioTrack): string {
+  // Bitrate is quantized to 32 kbps buckets: identical index-only duplicates
+  // report the same bitrate and still collapse, while a same-language 768k and
+  // 384k stream stay distinct menu options. `default` is deliberately excluded;
+  // it is a selection hint that can differ across otherwise identical streams
+  // and would split true duplicates, while the retained track carries the badge.
+  const bitrateBucket = Math.round((track.bitrate ?? 0) / 32);
   return [
     normalize(track.codec),
     track.channels ?? "",
     normalize(track.layout),
     normalizeLanguages(track),
     normalize(track.title) || normalize(track.embedded_title),
-    track.default ? "default" : "",
+    bitrateBucket,
   ].join("|");
 }
 

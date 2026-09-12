@@ -55,13 +55,33 @@ describe("dedupeAudioTracks", () => {
     expect(deduped).toHaveLength(4);
   });
 
-  it("does not collapse a default track into an otherwise identical non-default one", () => {
+  it("collapses otherwise identical tracks that differ only by the default flag", () => {
+    // `default` is a selection hint, not presentation identity: a container can
+    // mark one of two otherwise identical streams default. They are one menu
+    // row, and the retained track carries the badge.
     const deduped = dedupeAudioTracks([
       audioTrack({ default: true }),
       audioTrack({ default: false }),
     ]);
 
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0]?.track.default).toBe(true);
+  });
+
+  it("keeps same-language tracks at different bitrates distinct", () => {
+    const deduped = dedupeAudioTracks([audioTrack({ bitrate: 768 }), audioTrack({ bitrate: 384 })]);
+
     expect(deduped).toHaveLength(2);
+  });
+
+  it("collapses index-only duplicates that report the same bitrate", () => {
+    const deduped = dedupeAudioTracks([
+      audioTrack({ bitrate: 768, index: 4 }),
+      audioTrack({ bitrate: 768, index: 6 }),
+    ]);
+
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0]?.index).toBe(0);
   });
 
   it("normalizes a languages list against the single language tag", () => {
