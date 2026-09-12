@@ -103,28 +103,23 @@ const LIVE_SUBTITLE_INDEX = 1_000_000;
 // playhead; a hard cap also resumes so we never wait forever.
 const TRANSLATION_RESUME_TIMEOUT_MS = 30_000;
 
-// Only take the buffer-first seek path when the target sits this far inside a
-// buffered range. Landing right on the buffered edge can still stall waiting
-// for the next chunk, so require a completed second of media after the target.
-const BUFFERED_SEEK_MARGIN_SECONDS = 1;
-
 /**
- * Whether `nativeSeconds` lies inside a buffered range that has media after it.
+ * Whether `nativeSeconds` lies inside a buffered range: any target inside a
+ * buffered range seeks locally.
  *
  * The plan's timeline says what the server *can* serve; the element's buffer
  * says what it already has. Buffered bytes are playable without any server
- * interaction, so a small step whose target is already buffered must not be
- * handed to the reanchor path just because the plan reports
- * `can_seek_anywhere=false` or the growing manifest has not published the
- * target yet.
+ * interaction, so a target that is already buffered — at any distance from the
+ * current playhead — must not be handed to the reanchor path just because the
+ * plan reports `can_seek_anywhere=false` or the growing manifest has not
+ * published the target yet. The range is half-open: `buffered.start(i)` is
+ * inside and `buffered.end(i)` is not, so landing exactly on a buffered edge
+ * still reanchors rather than stalling on the next missing chunk.
  */
 function isTimeBuffered(video: HTMLVideoElement, nativeSeconds: number): boolean {
   const buffered = video.buffered;
   for (let i = 0; i < buffered.length; i++) {
-    if (
-      nativeSeconds >= buffered.start(i) &&
-      buffered.end(i) > nativeSeconds + BUFFERED_SEEK_MARGIN_SECONDS
-    ) {
+    if (nativeSeconds >= buffered.start(i) && buffered.end(i) > nativeSeconds) {
       return true;
     }
   }

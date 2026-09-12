@@ -1304,7 +1304,18 @@ describe("VideoPlayer buffered-first seeking", () => {
     expect(video.currentTime).toBe(30);
   });
 
-  it("still reanchors when the target is outside the buffer", async () => {
+  it("seeks locally to a target just inside the buffer edge", async () => {
+    const { video, onReanchorSeek } = renderSeekFixture(10, [[0, 40]]);
+    fireEvent.timeUpdate(video);
+    await waitFor(() => expect(seekControls().currentTime).toBe(10));
+
+    act(() => seekControls().onSeek(39.9));
+
+    expect(onReanchorSeek).not.toHaveBeenCalled();
+    expect(video.currentTime).toBe(39.9);
+  });
+
+  it("still reanchors when the target sits exactly on the buffered end", async () => {
     const { video, onReanchorSeek } = renderSeekFixture(10, [[0, 40]]);
     fireEvent.timeUpdate(video);
     await waitFor(() => expect(seekControls().currentTime).toBe(10));
@@ -1312,6 +1323,17 @@ describe("VideoPlayer buffered-first seeking", () => {
     act(() => seekControls().onSeek(seekControls().currentTime + 30));
 
     expect(onReanchorSeek).toHaveBeenCalledWith(40);
+    expect(video.currentTime).toBe(10);
+  });
+
+  it("still reanchors when the target is outside every buffered range", async () => {
+    const { video, onReanchorSeek } = renderSeekFixture(10, [[0, 40]]);
+    fireEvent.timeUpdate(video);
+    await waitFor(() => expect(seekControls().currentTime).toBe(10));
+
+    act(() => seekControls().onSeek(100));
+
+    expect(onReanchorSeek).toHaveBeenCalledWith(100);
     expect(video.currentTime).toBe(10);
   });
 
