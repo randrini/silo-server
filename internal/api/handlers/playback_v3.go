@@ -78,6 +78,14 @@ const (
 	routeCapabilityUnavailableReasonV3  = "route_capability_unavailable"
 )
 
+// v3NodeCapabilityRefreshInterval is both how often the background refresher
+// revisits pooled nodes and the freshness margin at which it re-probes one: a
+// quarter of the TTL keeps a healthy node warmed ahead of expiry, so a plan-time
+// read is a cache hit, without re-probing a node that just answered. It
+// collapses with a planning-triggered lazy refresh through the same per-node
+// singleflight slot (claimCapabilityRefreshLockedV3).
+const v3NodeCapabilityRefreshInterval = v3NodeCapabilityTTL / 4
+
 var errSubtitleStoreUnavailableV3 = errors.New("subtitle store unavailable")
 
 type v3NodeCapabilityCache struct {
@@ -297,6 +305,37 @@ func (h *PlaybackHandler) localToneMapCapabilitiesV3(ctx context.Context) (tonem
 	}
 	capabilities, err := probe(ctx, ffmpegPath, resolved, hwDevice)
 	return append(tonemap.Capabilities(nil), capabilities...), err
+}
+
+// localToneMapCapabilitiesCachedV3 returns the local tone-map inventory,
+// probing at most once per process. It mirrors transformationRegistryV3: the
+// local FFmpeg binary and hardware configuration are fixed for the process
+// lifetime, so a successful probe is reused for every later playback start. A
+// failed probe is deliberately not cached, so a transient failure (a busy
+// encoder, a timeout) is retried by the next caller instead of being frozen
+// for the life of the process.
+//
+// The first caller still pays for the probe on its own context. The startup
+// warmup is expected to have paid it already; when it has not, falling back to
+// a live probe preserves the planning outcome a live probe would produce.
+func (h *PlaybackHandler) localToneMapCapabilitiesCachedV3(ctx context.Context) (tonemap.Capabilities, error) {
+	h.v3LocalToneMapMu.Lock()
+	if h.v3LocalToneMapCached {
+		capabilities := append(tonemap.Capabilities(nil), h.v3LocalToneMapCaps...)
+		h.v3LocalToneMapMu.Unlock()
+		return capabilities, nil
+	}
+	h.v3LocalToneMapMu.Unlock()
+
+	capabilities, err := h.localToneMapCapabilitiesV3(ctx)
+	if err != nil {
+		return capabilities, err
+	}
+	h.v3LocalToneMapMu.Lock()
+	h.v3LocalToneMapCaps = append(tonemap.Capabilities(nil), capabilities...)
+	h.v3LocalToneMapCached = true
+	h.v3LocalToneMapMu.Unlock()
+	return capabilities, nil
 }
 
 func (h *PlaybackHandler) localToneMapCapabilitiesForTransportV3(ctx context.Context) (tonemap.Capabilities, error) {
@@ -638,6 +677,76 @@ func (h *PlaybackHandler) StartCapabilityWarmupV3(ctx context.Context) {
 		return
 	}
 	go h.warmPlaybackCapabilitiesV3(ctx)
+	h.startNodeCapabilityRefresherV3(ctx)
+}
+
+// startNodeCapabilityRefresherV3 keeps the pooled-node capability cache warm so
+// plan-time reads are cache hits instead of node round-trips. The startup
+// warmup populates the cache once; this refreshes each node before its TTL
+// lapses, so sparse or bursty traffic never meets a cold entry. It is started
+// once and stops with the application context.
+func (h *PlaybackHandler) startNodeCapabilityRefresherV3(ctx context.Context) {
+	h.v3RefresherOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(v3NodeCapabilityRefreshInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					h.refreshStaleNodeCapabilitiesV3()
+				}
+			}
+		}()
+	})
+}
+
+// refreshStaleNodeCapabilitiesV3 re-probes every pooled node whose cached
+// capabilities are missing, failed, or close enough to expiry that they would
+// lapse before the next sweep. Each refresh claims the node's existing
+// singleflight slot, so it collapses with a planning-triggered lazy refresh
+// rather than running beside it. A node whose entry is still comfortably fresh
+// is left alone.
+func (h *PlaybackHandler) refreshStaleNodeCapabilitiesV3() {
+	now := time.Now()
+	for _, nodeURL := range h.nodeCapabilityURLsV3() {
+		if h.nodeCapabilityExpiringV3(nodeURL, now) {
+			h.refreshRemoteCapabilitiesV3(nodeURL)
+		}
+	}
+}
+
+// nodeCapabilityURLsV3 lists every pooled node whose capabilities planning or
+// transport may read, transcode and proxy alike. A planner that enumerates
+// neither pool contributes none.
+func (h *PlaybackHandler) nodeCapabilityURLsV3() []string {
+	var nodeURLs []string
+	if enumerator, ok := h.NodePlanner.(transcodeNodeEnumeratorV3); ok {
+		nodeURLs = append(nodeURLs, enumerator.TranscodeNodeURLs()...)
+	}
+	if enumerator, ok := h.NodePlanner.(proxyNodeEnumeratorV3); ok {
+		nodeURLs = append(nodeURLs, enumerator.ProxyNodeURLs()...)
+	}
+	return nodeURLs
+}
+
+// nodeCapabilityExpiringV3 reports whether a node's cached inventory should be
+// refreshed now. A missing or failed entry is always due; a successful entry is
+// due once it is within one refresh interval of expiry, which keeps the 1min
+// TTL semantics while moving the probe off the plan-time path.
+func (h *PlaybackHandler) nodeCapabilityExpiringV3(nodeURL string, now time.Time) bool {
+	nodeURL = nodepool.NormalizeNodeURL(nodeURL)
+	h.v3NodeCapabilitiesMu.Lock()
+	defer h.v3NodeCapabilitiesMu.Unlock()
+	entry, ok := h.v3NodeCapabilities[nodeURL]
+	if !ok {
+		return true
+	}
+	if entry.err != nil {
+		return true
+	}
+	return !now.Add(v3NodeCapabilityRefreshInterval).Before(entry.expiresAt)
 }
 
 func (h *PlaybackHandler) warmPlaybackCapabilitiesV3(ctx context.Context) {
@@ -648,7 +757,7 @@ func (h *PlaybackHandler) warmPlaybackCapabilitiesV3(ctx context.Context) {
 	settings := h.plannerSettingsV3(ctx)
 	policy := tonemap.NewPolicy(settings.HardwareToneMapEnabled, settings.SoftwareToneMapEnabled)
 	if policy != tonemap.PolicyNone {
-		if _, err := h.localToneMapCapabilitiesV3(ctx); err != nil {
+		if _, err := h.localToneMapCapabilitiesCachedV3(ctx); err != nil {
 			slog.DebugContext(ctx, "protocol v3 local capability warmup failed", "component", "api", "error", err)
 		}
 	}
@@ -1026,7 +1135,7 @@ func (h *PlaybackHandler) hlsToneMapCapabilityInventoryForClientV3(
 		localWG.Add(1)
 		go func() {
 			defer localWG.Done()
-			localResult.capabilities, localResult.err = h.localToneMapCapabilitiesV3(fetchCtx)
+			localResult.capabilities, localResult.err = h.localToneMapCapabilitiesCachedV3(fetchCtx)
 		}()
 	}
 

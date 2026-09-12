@@ -366,6 +366,15 @@ type PlaybackHandler struct {
 	v3ToneMapProbe       func(context.Context, string, string, string) (tonemap.Capabilities, error)
 	v3NodeCapabilitiesMu sync.Mutex
 	v3NodeCapabilities   map[string]v3NodeCapabilityCache
+
+	// v3LocalToneMapMu guards the process-lifetime local tone-map inventory.
+	// Unlike the per-node inventory it is not refreshed on a TTL: the local
+	// FFmpeg/hardware configuration is fixed for the process, so a successful
+	// probe is reused for every start exactly like v3Registry. A failed probe
+	// is not cached and is retried by the next caller.
+	v3LocalToneMapMu     sync.Mutex
+	v3LocalToneMapCaps   tonemap.Capabilities
+	v3LocalToneMapCached bool
 	// v3NodeProbeBudgets holds what each node last said a capability read of it
 	// costs, guarded by v3NodeCapabilitiesMu. It is kept apart from the
 	// inventory above because the two are invalidated for different reasons: an
@@ -383,6 +392,7 @@ type PlaybackHandler struct {
 	// lock as the invalidation counter, so a refresh cannot release its slot in
 	// between an invalidation and that invalidation's claim on it.
 	v3NodeCapabilityRefresh map[string]struct{}
+	v3RefresherOnce         sync.Once // starts the background capability refresher once; see StartCapabilityWarmupV3
 	v3EventOnce             sync.Once
 	v3EventQueue            chan playback.RouteEventRecordV3
 	v3AudioPreferenceMu     sync.Mutex
