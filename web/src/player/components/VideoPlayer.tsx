@@ -103,6 +103,34 @@ const LIVE_SUBTITLE_INDEX = 1_000_000;
 // playhead; a hard cap also resumes so we never wait forever.
 const TRANSLATION_RESUME_TIMEOUT_MS = 30_000;
 
+// Only take the buffer-first seek path when the target sits this far inside a
+// buffered range. Landing right on the buffered edge can still stall waiting
+// for the next chunk, so require a completed second of media after the target.
+const BUFFERED_SEEK_MARGIN_SECONDS = 1;
+
+/**
+ * Whether `nativeSeconds` lies inside a buffered range that has media after it.
+ *
+ * The plan's timeline says what the server *can* serve; the element's buffer
+ * says what it already has. Buffered bytes are playable without any server
+ * interaction, so a small step whose target is already buffered must not be
+ * handed to the reanchor path just because the plan reports
+ * `can_seek_anywhere=false` or the growing manifest has not published the
+ * target yet.
+ */
+function isTimeBuffered(video: HTMLVideoElement, nativeSeconds: number): boolean {
+  const buffered = video.buffered;
+  for (let i = 0; i < buffered.length; i++) {
+    if (
+      nativeSeconds >= buffered.start(i) &&
+      buffered.end(i) > nativeSeconds + BUFFERED_SEEK_MARGIN_SECONDS
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Matches a subtitle track by identity — the fields that describe the same
  * underlying track across two files' inventories. Used to carry a manual
@@ -884,6 +912,18 @@ export function VideoPlayer({
       setCurrentTime(seconds);
 
       const nativeSeconds = toPlayerTime(seconds, timelineOffsetRef.current);
+
+      // Buffer-first: bytes already in the element's buffer play without any
+      // server round trip, so a target inside them is a local seek no matter
+      // what `canSeekAnywhere` claims or what window the server last planned.
+      // This is what keeps a ±skip step seamless on routes that report
+      // can_seek_anywhere=false. Falling through to the seekable/reanchor
+      // checks still rebuilds a genuinely unbuffered far seek.
+      if (isTimeBuffered(video, nativeSeconds)) {
+        video.currentTime = nativeSeconds;
+        return true;
+      }
+
       if (canSeekAnywhere) {
         if (isHlsStream) video.currentTime = nativeSeconds;
         else handleSeek(nativeSeconds);

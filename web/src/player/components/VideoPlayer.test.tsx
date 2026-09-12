@@ -193,6 +193,22 @@ function setMediaError(video: HTMLVideoElement, message: string) {
   });
 }
 
+/** Installs a fake `TimeRanges` list so tests can drive buffer/seek checks. */
+function setTimeRanges(
+  video: HTMLVideoElement,
+  property: "buffered" | "seekable",
+  ranges: Array<[number, number]>,
+) {
+  Object.defineProperty(video, property, {
+    configurable: true,
+    value: {
+      length: ranges.length,
+      start: (index: number) => ranges[index]?.[0] ?? 0,
+      end: (index: number) => ranges[index]?.[1] ?? 0,
+    } as TimeRanges,
+  });
+}
+
 describe("VideoPlayer plan failure recovery", () => {
   beforeEach(() => {
     realtimeOptions.current = null;
@@ -1209,6 +1225,105 @@ describe("VideoPlayer translation handoff", () => {
     await waitFor(() =>
       expect((controls.current as unknown as { currentTime: number }).currentTime).toBe(50),
     );
+  });
+});
+
+describe("VideoPlayer buffered-first seeking", () => {
+  beforeEach(() => {
+    realtimeOptions.current = null;
+    controls.current = null;
+    subtitleTimeline.textOffsetSeconds = null;
+    subtitleTimeline.assOffsetSeconds = null;
+    subtitleHooks.vttSourceChanged = null;
+    subtitleHooks.assSourceChanged = null;
+    hlsJS.supported = false;
+    hlsJS.constructed.mockClear();
+    toastError.mockClear();
+    playerSeek.mockClear();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  // The growing-manifest/remux routes force can_seek_anywhere=false, so they
+  // exercise the path that used to fall straight through to the reanchor.
+  const nonSeekablePlan = () =>
+    fixturePlanV3({
+      ...directPlan,
+      timeline: { ...directPlan.timeline, can_seek_anywhere: false },
+    });
+
+  function renderSeekFixture(position: number, buffered: Array<[number, number]>) {
+    const onReanchorSeek = vi.fn();
+    const { container } = renderPlayer({ plan: nonSeekablePlan(), onReanchorSeek });
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+    Object.defineProperty(video, "currentTime", {
+      configurable: true,
+      writable: true,
+      value: position,
+    });
+    setTimeRanges(video, "buffered", buffered);
+    setTimeRanges(video, "seekable", []);
+    return { video, onReanchorSeek };
+  }
+
+  function seekControls() {
+    return controls.current as unknown as {
+      currentTime: number;
+      onSeek: (seconds: number) => void;
+    };
+  }
+
+  it("skips 30s forward into the buffer without a reanchor", async () => {
+    const { video, onReanchorSeek } = renderSeekFixture(10, [[0, 80]]);
+    fireEvent.timeUpdate(video);
+    await waitFor(() => expect(seekControls().currentTime).toBe(10));
+
+    playerSeek.mockClear();
+    act(() => seekControls().onSeek(seekControls().currentTime + 30));
+
+    expect(onReanchorSeek).not.toHaveBeenCalled();
+    expect(video.currentTime).toBe(40);
+  });
+
+  it("skips 30s backward into the buffer without a reanchor", async () => {
+    const { video, onReanchorSeek } = renderSeekFixture(60, [[0, 80]]);
+    fireEvent.timeUpdate(video);
+    await waitFor(() => expect(seekControls().currentTime).toBe(60));
+
+    playerSeek.mockClear();
+    act(() => seekControls().onSeek(seekControls().currentTime - 30));
+
+    expect(onReanchorSeek).not.toHaveBeenCalled();
+    expect(video.currentTime).toBe(30);
+  });
+
+  it("still reanchors when the target is outside the buffer", async () => {
+    const { video, onReanchorSeek } = renderSeekFixture(10, [[0, 40]]);
+    fireEvent.timeUpdate(video);
+    await waitFor(() => expect(seekControls().currentTime).toBe(10));
+
+    act(() => seekControls().onSeek(seekControls().currentTime + 30));
+
+    expect(onReanchorSeek).toHaveBeenCalledWith(40);
+    expect(video.currentTime).toBe(10);
+  });
+
+  it("keeps a random seek inside the buffer on the local path", async () => {
+    const { video, onReanchorSeek } = renderSeekFixture(10, [[0, 200]]);
+    fireEvent.timeUpdate(video);
+    await waitFor(() => expect(seekControls().currentTime).toBe(10));
+
+    act(() => seekControls().onSeek(150));
+
+    expect(onReanchorSeek).not.toHaveBeenCalled();
+    expect(video.currentTime).toBe(150);
   });
 });
 

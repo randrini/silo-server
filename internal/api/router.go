@@ -1419,7 +1419,15 @@ func NewRouter(deps Dependencies) chi.Router {
 				if title == "" {
 					return
 				}
-				results, err := subtitleManager.Search(ctx, subtitles.SearchRequest{
+				// Download the best match per language, then tell any open
+				// playback session about each new track so its subtitle menu
+				// updates mid-session. The notifier is assigned later in this
+				// function; the closure only runs after wiring completes.
+				var readyNotifier subtitles.SubtitleReadyNotifier
+				if subtitleAINotifier != nil {
+					readyNotifier = subtitleAINotifier
+				}
+				subtitles.DownloadBestMatches(ctx, subtitleManager, readyNotifier, fileID, subtitles.SearchRequest{
 					IMDbID:    imdbID,
 					Title:     title,
 					Year:      year,
@@ -1427,26 +1435,6 @@ func NewRouter(deps Dependencies) chi.Router {
 					Episode:   episode,
 					Languages: languages,
 				})
-				if err != nil || len(results.Results) == 0 {
-					return
-				}
-				// Download the best match per language.
-				for _, lang := range languages {
-					for _, r := range results.Results {
-						if !strings.EqualFold(r.Language, lang) {
-							continue
-						}
-						_, dlErr := subtitleManager.Download(ctx, subtitles.DownloadRequest{
-							ProviderName: r.Provider, SubtitleID: r.ID,
-							Language:    r.Language,
-							ReleaseName: r.ReleaseName, MediaFileID: fileID,
-							HearingImpaired: r.HearingImpaired,
-						})
-						if dlErr == nil {
-							break // one good match per language is enough
-						}
-					}
-				}
 			}
 		}
 		if recsRepoForStale != nil {
