@@ -524,7 +524,7 @@ func (h *DownloadHandler) handleDirectDownload(w http.ResponseWriter, r *http.Re
 	// instead of truncating the body at 120 s.
 	sw := httpstream.NewRollingDeadlineWriter(w)
 	if err := h.svc.ServeDirect(serveCtx, sw, r, userID, fileID, r.URL.Query().Get("format"), filter); err != nil {
-		h.writeDownloadError(w, err)
+		h.writeDownloadError(sw, err)
 		return
 	}
 }
