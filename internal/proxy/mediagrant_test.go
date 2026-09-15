@@ -247,7 +247,7 @@ func TestProxyGrantRoutesEnforceCommittedProxyEgress(t *testing.T) {
 func TestProxyGrantTranscodeRelaysToTheNodeWithAProxyMintedToken(t *testing.T) {
 	var forwarded, authorization, relayPath string
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		forwarded = r.Header.Get("X-Silo-Stream-Token")
+		forwarded = r.Header.Get("X-Vio-Stream-Token")
 		authorization = r.Header.Get("Authorization")
 		relayPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -304,7 +304,7 @@ func TestProxyGrantTranscodeRelaysToTheNodeWithAProxyMintedToken(t *testing.T) {
 func TestProxyGrantProgressiveRemuxRelaysToTranscodeNode(t *testing.T) {
 	var forwarded, relayPath, relayQuery string
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		forwarded = r.Header.Get("X-Silo-Stream-Token")
+		forwarded = r.Header.Get("X-Vio-Stream-Token")
 		relayPath = r.URL.Path
 		relayQuery = r.URL.RawQuery
 		_, _ = w.Write([]byte("remote-remux"))

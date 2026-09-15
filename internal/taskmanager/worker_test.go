@@ -66,9 +66,9 @@ func TestWorkloadObservationTracksTaskExecution(t *testing.T) {
 		fail          bool
 	}{{"complete", "success", false}, {"failure", "error", true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			before := workMetricValue(t, "silo_work_attempts_total", "other", tc.outcome)
+			before := workMetricValue(t, "vio_work_attempts_total", "other", tc.outcome)
 			task := observedTask{execute: func(ctx context.Context, p ProgressReporter) error {
-				if got := workMetricValue(t, "silo_work_active", "other", ""); got != 1 {
+				if got := workMetricValue(t, "vio_work_active", "other", ""); got != 1 {
 					t.Fatalf("active during execution %v", got)
 				}
 				p.Report(50, "private title is never a metric label")
@@ -81,10 +81,10 @@ func TestWorkloadObservationTracksTaskExecution(t *testing.T) {
 			if _, err := worker.run(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			if after := workMetricValue(t, "silo_work_attempts_total", "other", tc.outcome); after-before != 1 {
+			if after := workMetricValue(t, "vio_work_attempts_total", "other", tc.outcome); after-before != 1 {
 				t.Fatalf("completion %v -> %v", before, after)
 			}
-			if got := workMetricValue(t, "silo_work_active", "other", ""); got != 0 {
+			if got := workMetricValue(t, "vio_work_active", "other", ""); got != 0 {
 				t.Fatalf("active after execution %v", got)
 			}
 		})

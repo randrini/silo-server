@@ -645,7 +645,7 @@ func TestEffectiveArtifactDir(t *testing.T) {
 	// cleanup sweep would otherwise delete a nested artifact dir) and never the
 	// process cwd (a relative/empty path).
 	got := effectiveArtifactDir("", "/var/lib/silo/transcode")
-	if got != "/var/lib/silo/silo-download-artifacts" {
+	if got != "/var/lib/silo/vio-download-artifacts" {
 		t.Fatalf("default dir = %q, want sibling of transcode dir", got)
 	}
 	if strings.HasPrefix(got, "/var/lib/silo/transcode/") {

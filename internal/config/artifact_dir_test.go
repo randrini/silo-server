@@ -10,14 +10,14 @@ func TestEffectiveDownloadArtifactDir(t *testing.T) {
 		want         string
 	}{
 		{"explicit artifact dir wins", "/mnt/downloads", "/mnt/fast/transcode", "/mnt/downloads"},
-		{"both blank uses the default transcode dir", "", "", "/tmp/silo-download-artifacts"},
-		{"sibling of a custom transcode dir", "", "/mnt/fast/transcode", "/mnt/fast/silo-download-artifacts"},
+		{"both blank uses the default transcode dir", "", "", "/tmp/vio-download-artifacts"},
+		{"sibling of a custom transcode dir", "", "/mnt/fast/transcode", "/mnt/fast/vio-download-artifacts"},
 		// A trailing slash must not nest the artifact root inside the
 		// transcode dir: the orphaned-transcode sweep deletes non-active
 		// subdirectories of the transcode root, so nesting is data loss.
-		{"trailing slash still yields the sibling", "", "/mnt/fast/transcode/", "/mnt/fast/silo-download-artifacts"},
-		{"root transcode dir", "", "/", "/silo-download-artifacts"},
-		{"repeated separators are cleaned", "", "/mnt//fast/transcode", "/mnt/fast/silo-download-artifacts"},
+		{"trailing slash still yields the sibling", "", "/mnt/fast/transcode/", "/mnt/fast/vio-download-artifacts"},
+		{"root transcode dir", "", "/", "/vio-download-artifacts"},
+		{"repeated separators are cleaned", "", "/mnt//fast/transcode", "/mnt/fast/vio-download-artifacts"},
 	}
 
 	for _, tc := range cases {

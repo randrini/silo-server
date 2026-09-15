@@ -339,7 +339,7 @@ export interface WebhookSyncProfileMapping {
   connection_id?: string;
   external_user_id: string;
   external_user_name: string;
-  silo_profile_id?: string | null;
+  vio_profile_id?: string | null;
   last_seen_at?: string;
   created_at?: string;
   updated_at?: string;
@@ -389,7 +389,7 @@ export interface UpdateWebhookSyncProfileMappingsRequest {
   mappings: Array<{
     external_user_id: string;
     external_user_name: string;
-    silo_profile_id: string | null;
+    vio_profile_id: string | null;
   }>;
 }
 
@@ -510,10 +510,10 @@ export interface HistoryImportUserMapping {
   source_id: number;
   external_user_id: string;
   external_user_name: string;
-  silo_user_id: number;
-  silo_profile_id: string;
-  silo_username?: string;
-  silo_profile_name?: string;
+  vio_user_id: number;
+  vio_profile_id: string;
+  vio_username?: string;
+  vio_profile_name?: string;
   last_imported_at?: string;
   created_at: string;
   updated_at: string;
@@ -523,13 +523,13 @@ export interface CreateHistoryImportMappingRequest {
   source_id: number;
   external_user_id: string;
   external_user_name: string;
-  silo_user_id: number;
-  silo_profile_id: string;
+  vio_user_id: number;
+  vio_profile_id: string;
 }
 
 export interface UpdateHistoryImportMappingRequest {
-  silo_user_id?: number;
-  silo_profile_id?: string;
+  vio_user_id?: number;
+  vio_profile_id?: string;
 }
 
 export interface AdminHistoryImportBulkRunResult {

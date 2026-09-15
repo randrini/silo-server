@@ -12,7 +12,7 @@ import (
 func assertJellyfinAuthorization(t *testing.T, r *http.Request, token string) {
 	t.Helper()
 
-	want := `MediaBrowser Client="watch-importer", Device="Silo", DeviceId="silo-history-import", Version="1.0.0"`
+	want := `MediaBrowser Client="watch-importer", Device="Vio", DeviceId="vio-history-import", Version="1.0.0"`
 	if token != "" {
 		want += `, Token="` + token + `"`
 	}

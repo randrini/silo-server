@@ -22,7 +22,7 @@ func TestStreamingProtocolOriginResponses(t *testing.T) {
 	} {
 		t.Run(tc.method+tc.suffix, func(t *testing.T) {
 			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != tc.method || r.URL.Path != "/transcode/transport/"+tc.suffix || r.URL.RawQuery != "opaque=1" || r.Header.Get("Authorization") != "Bearer "+secret || r.Header.Get("X-Silo-Stream-Token") == "" {
+				if r.Method != tc.method || r.URL.Path != "/transcode/transport/"+tc.suffix || r.URL.RawQuery != "opaque=1" || r.Header.Get("Authorization") != "Bearer "+secret || r.Header.Get("X-Vio-Stream-Token") == "" {
 					t.Error("relay identity/query lost")
 				}
 				segment := strings.HasPrefix(tc.suffix, "segment/")

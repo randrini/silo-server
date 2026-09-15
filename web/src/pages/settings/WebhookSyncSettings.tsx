@@ -345,7 +345,7 @@ export default function WebhookSyncSettings() {
       .map(({ user, mapping }) => ({
         external_user_id: user.external_user_id,
         external_user_name: user.external_user_name,
-        silo_profile_id: mapping?.silo_profile_id ?? "",
+        vio_profile_id: mapping?.vio_profile_id ?? "",
       }))
       .sort((a, b) => a.external_user_name.localeCompare(b.external_user_name));
   }, [mappingsQuery.data]);
@@ -534,11 +534,11 @@ export default function WebhookSyncSettings() {
       connectionId: currentConnectionId,
       body: {
         mappings: mappingRows.map((row) => {
-          const value = currentMappingDrafts[row.external_user_id] ?? row.silo_profile_id;
+          const value = currentMappingDrafts[row.external_user_id] ?? row.vio_profile_id;
           return {
             external_user_id: row.external_user_id,
             external_user_name: row.external_user_name,
-            silo_profile_id: !value || value === UNMAPPED_VALUE ? null : value,
+            vio_profile_id: !value || value === UNMAPPED_VALUE ? null : value,
           };
         }),
       },
@@ -975,7 +975,7 @@ export default function WebhookSyncSettings() {
                             <Select
                               value={
                                 currentMappingDrafts[row.external_user_id] ??
-                                row.silo_profile_id ??
+                                row.vio_profile_id ??
                                 UNMAPPED_VALUE
                               }
                               onValueChange={(value) =>

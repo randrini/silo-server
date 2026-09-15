@@ -762,7 +762,7 @@ func TestAdminUpdateSettingsSkipsFunctionalNoOp(t *testing.T) {
 }
 
 func TestAdminUpdateSettingsPersistsClearWhenOverrideEqualsDefault(t *testing.T) {
-	settings := &fakeServerSettingsStore{values: map[string]string{"branding.server_name": "Silo"}}
+	settings := &fakeServerSettingsStore{values: map[string]string{"branding.server_name": "Vio"}}
 	handler := &AdminHandler{SettingsRepo: settings, RestartStatus: NewServerRestartStatusTracker()}
 	req := httptest.NewRequest(
 		http.MethodPut,
@@ -786,7 +786,7 @@ func TestAdminUpdateSettingsPersistsClearWhenOverrideEqualsDefault(t *testing.T)
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Values["branding.server_name"] != "Silo" || response.RestartRequired {
+	if response.Values["branding.server_name"] != "Vio" || response.RestartRequired {
 		t.Fatalf("response = %#v, want unchanged effective default without restart", response)
 	}
 }
@@ -816,14 +816,14 @@ func TestAdminUpdateSettingsReturnsEffectiveDefaultAfterClear(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Values["branding.server_name"] != "Silo" {
+	if response.Values["branding.server_name"] != "Vio" {
 		t.Fatalf("response values = %#v, want effective default", response.Values)
 	}
 	if settings.values["branding.server_name"] != "" {
 		t.Fatalf("stored value = %q, want cleared override", settings.values["branding.server_name"])
 	}
-	if callbackValue != "Silo" {
-		t.Fatalf("callback value = %q, want effective default Silo", callbackValue)
+	if callbackValue != "Vio" {
+		t.Fatalf("callback value = %q, want effective default Vio", callbackValue)
 	}
 }
 
@@ -853,16 +853,16 @@ func TestAdminUpdateSettingReturnsEffectiveDefaultAfterClear(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Value != "Silo" {
+	if response.Value != "Vio" {
 		t.Fatalf("response value = %q, want effective default", response.Value)
 	}
-	if callbackValue != "Silo" {
-		t.Fatalf("callback value = %q, want effective default Silo", callbackValue)
+	if callbackValue != "Vio" {
+		t.Fatalf("callback value = %q, want effective default Vio", callbackValue)
 	}
 }
 
 func TestAdminUpdateSettingPersistsClearWhenOverrideEqualsDefault(t *testing.T) {
-	settings := &fakeServerSettingsStore{values: map[string]string{"branding.server_name": "Silo"}}
+	settings := &fakeServerSettingsStore{values: map[string]string{"branding.server_name": "Vio"}}
 	handler := &AdminHandler{SettingsRepo: settings}
 	req := httptest.NewRequest(
 		http.MethodPut,
@@ -887,7 +887,7 @@ func TestAdminUpdateSettingPersistsClearWhenOverrideEqualsDefault(t *testing.T) 
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Value != "Silo" || response.RestartRequired {
+	if response.Value != "Vio" || response.RestartRequired {
 		t.Fatalf("response = %#v, want unchanged effective default without restart", response)
 	}
 }

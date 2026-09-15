@@ -80,7 +80,7 @@ func TestWebhookMappingsRejectDuplicateUsersBeforeWrite(t *testing.T) {
 	deps := pilotDeps(nil, nil)
 	deps.WebhookSync = new(fakeWebhookManagement)
 	h := newTestHandler(t, deps)
-	for _, body := range []string{`{"mappings":[{"external_user_id":" ","external_user_name":"x","silo_profile_id":null}]}`, `{"mappings":[{"external_user_id":"same","external_user_name":"x","silo_profile_id":null},{"external_user_id":"same","external_user_name":"y","silo_profile_id":null}]}`} {
+	for _, body := range []string{`{"mappings":[{"external_user_id":" ","external_user_name":"x","vio_profile_id":null}]}`, `{"mappings":[{"external_user_id":"same","external_user_name":"x","vio_profile_id":null},{"external_user_id":"same","external_user_name":"y","vio_profile_id":null}]}`} {
 		requireProblem(t, do(t, h, http.MethodPut, Prefix+"/webhook-sync/connections/"+webhookFixtureID+"/profile-mappings", body, bearer(memberToken)), TypeValidationFailed)
 	}
 }

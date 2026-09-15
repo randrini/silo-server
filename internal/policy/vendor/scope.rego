@@ -1,11 +1,11 @@
-package silo.scope
+package vio.scope
 
 import rego.v1
-import data.silo.lib.quality
-import data.silo.lib.ratings
+import data.vio.lib.quality
+import data.vio.lib.ratings
 
 decision := tightened if {
-	override := data.silo_custom.scope.override(base_decision, input)
+	override := data.vio_custom.scope.override(base_decision, input)
 	tightened := tighten(base_decision, override)
 } else := base_decision
 

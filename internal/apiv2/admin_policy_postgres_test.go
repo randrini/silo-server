@@ -81,7 +81,7 @@ func TestAdminPolicyPostgresTransport(t *testing.T) {
 	if current := do(t, h, "GET", path, "", bearer(adminToken)).Header().Get("ETag"); current != before {
 		t.Fatal("rejected activation advanced revision")
 	}
-	source := "package silo_custom.scope\nimport rego.v1\noverride(base, _) := base"
+	source := "package vio_custom.scope\nimport rego.v1\noverride(base, _) := base"
 	body, _ := json.Marshal(AdminPolicyVersionCreate{Source: source})
 	valid := do(t, h, "POST", path+"/versions", string(body), bearer(adminToken))
 	if valid.Code != 201 {

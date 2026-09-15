@@ -12531,7 +12531,7 @@
     {
       "name": "update_subtitle_appearance_device_override_device_header_required",
       "operation_id": "updateSubtitleAppearanceDeviceOverride",
-      "scenario": "A device override has no meaning without a device: X-Silo-Device-Id is a required header, refused as a validation failure (v1 answered 400).",
+      "scenario": "A device override has no meaning without a device: X-Vio-Device-Id is a required header, refused as a validation failure (v1 answered 400).",
       "request": {
         "method": "PUT",
         "path": "/api/v2/settings/device/subtitle-appearance",

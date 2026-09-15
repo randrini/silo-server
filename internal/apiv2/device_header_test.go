@@ -10,7 +10,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/downloads"
 )
 
-// A client that attaches X-Silo-Device-Id twice reaches Huma as "id,id";
+// A client that attaches X-Vio-Device-Id twice reaches Huma as "id,id";
 // v1 read the first line and never saw it. The guard refuses the repeated
 // header and any comma-bearing or whitespace-bearing value before the
 // operation binds it, so no device identity like that can be stored.

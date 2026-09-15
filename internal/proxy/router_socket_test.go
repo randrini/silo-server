@@ -345,7 +345,7 @@ func TestMountedProxyRouterRelaysToNode(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		forwardedToken = r.Header.Get("X-Silo-Stream-Token")
+		forwardedToken = r.Header.Get("X-Vio-Stream-Token")
 		w.Header().Set("Content-Type", "video/mp2t")
 		_, _ = io.WriteString(w, segment)
 	}))
@@ -396,7 +396,7 @@ func TestMountedProxyRouterRelaysProgressiveRemuxToTranscodeNode(t *testing.T) {
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		relayPath = r.URL.Path
 		relayQuery = r.URL.RawQuery
-		forwardedToken = r.Header.Get("X-Silo-Stream-Token")
+		forwardedToken = r.Header.Get("X-Vio-Stream-Token")
 		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(node.Close)

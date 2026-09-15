@@ -139,7 +139,7 @@ func TestStreamDenyNilIsNoOp(t *testing.T) {
 func TestStreamDenyWritesMarkerWithTokenLifetime(t *testing.T) {
 	deny, client, _, _ := newTestStreamDeny(t)
 	deny.Deny(t.Context(), "sid-1")
-	key, ok := client.keys["silo:streamauth:sid-1"]
+	key, ok := client.keys["vio:streamauth:sid-1"]
 	if !ok {
 		t.Fatalf("marker key missing; keys = %v", client.keys)
 	}

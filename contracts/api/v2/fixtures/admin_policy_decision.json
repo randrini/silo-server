@@ -1,7 +1,7 @@
 {
   "id": "3",
   "timestamp": "2026-01-02T03:04:05.678Z",
-  "decision_name": "silo.permission.decision",
+  "decision_name": "vio.permission.decision",
   "policy_generation": 7,
   "user_id": null,
   "profile_id": null,

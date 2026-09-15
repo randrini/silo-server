@@ -45,7 +45,7 @@ beforeEach(() => {
 describe("admin history import wire adapter", () => {
   it("writes string IDs and original editor tags without response-only fields", async () => {
     vi.mocked(v2).mockImplementation((_op, options) =>
-      reply(options, { id: "3", source_id: "1", silo_user_id: "9" }),
+      reply(options, { id: "3", source_id: "1", vio_user_id: "9" }),
     );
     await updateAdminImportSource(
       1,
@@ -57,11 +57,11 @@ describe("admin history import wire adapter", () => {
       headers: { "If-Match": '"source"' },
       body: { base_url: "https://other.invalid", admin_token: "" },
     });
-    await updateAdminImportMapping(3, { silo_user_id: 9, silo_profile_id: "target" }, '"mapping"');
+    await updateAdminImportMapping(3, { vio_user_id: 9, vio_profile_id: "target" }, '"mapping"');
     expect(vi.mocked(v2).mock.calls[1]![1]).toMatchObject({
       path: { id: "3" },
       headers: { "If-Match": '"mapping"' },
-      body: { silo_user_id: "9", silo_profile_id: "target" },
+      body: { vio_user_id: "9", vio_profile_id: "target" },
     });
     await expect(updateAdminImportSource(1, {})).rejects.toThrow("Reload");
     expect(v2).toHaveBeenCalledTimes(2);

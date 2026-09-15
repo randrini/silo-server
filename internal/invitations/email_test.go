@@ -31,7 +31,7 @@ func TestComposeInvitationEmailEscapesNote(t *testing.T) {
 func TestComposeInvitationEmailDefaultsInviter(t *testing.T) {
 	now := time.Now()
 	content := composeInvitationEmail("", "", "m@x.io", "https://x/invite/t", "", now.Add(time.Hour), now)
-	if content.Subject != "An admin invited you to Silo" {
+	if content.Subject != "An admin invited you to Vio" {
 		t.Errorf("subject = %q", content.Subject)
 	}
 }

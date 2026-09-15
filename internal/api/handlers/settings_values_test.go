@@ -271,8 +271,8 @@ func TestNavigationShortcutMutationIdempotency(t *testing.T) {
 		t.Fatalf("first mutation = %d: %s", first.Code, first.Body.String())
 	}
 	replay := routeNavigationShortcutMutation(t, handler, body, mutationID)
-	if replay.Code != http.StatusOK || replay.Header().Get("X-Silo-Idempotent-Replay") != "true" {
-		t.Fatalf("replay = %d header %q: %s", replay.Code, replay.Header().Get("X-Silo-Idempotent-Replay"), replay.Body.String())
+	if replay.Code != http.StatusOK || replay.Header().Get("X-Vio-Idempotent-Replay") != "true" {
+		t.Fatalf("replay = %d header %q: %s", replay.Code, replay.Header().Get("X-Vio-Idempotent-Replay"), replay.Body.String())
 	}
 	if strings.TrimSpace(replay.Body.String()) != strings.TrimSpace(first.Body.String()) {
 		t.Fatalf("replay body = %s, want exact %s", replay.Body.String(), first.Body.String())
@@ -293,8 +293,8 @@ func TestNavigationShortcutMutationIdempotency(t *testing.T) {
 	removeReplay := routeNavigationShortcutMutation(t, handler,
 		`{"item":{"type":"collection","collection_id":"watchlist","label":"Second"},"present":false}`,
 		removeID)
-	if removed.Code != http.StatusOK || removeReplay.Code != http.StatusOK || removeReplay.Header().Get("X-Silo-Idempotent-Replay") != "true" {
-		t.Fatalf("semantic remove replay = %d/%d header %q", removed.Code, removeReplay.Code, removeReplay.Header().Get("X-Silo-Idempotent-Replay"))
+	if removed.Code != http.StatusOK || removeReplay.Code != http.StatusOK || removeReplay.Header().Get("X-Vio-Idempotent-Replay") != "true" {
+		t.Fatalf("semantic remove replay = %d/%d header %q", removed.Code, removeReplay.Code, removeReplay.Header().Get("X-Vio-Idempotent-Replay"))
 	}
 }
 
@@ -313,9 +313,9 @@ func TestNavigationShortcutMutationThroughNotificationWrappedProvider(t *testing
 		t.Fatalf("wrapped first mutation = %d: %s", first.Code, first.Body.String())
 	}
 	replay := routeNavigationShortcutMutation(t, handler, body, mutationID)
-	if replay.Code != http.StatusOK || replay.Header().Get("X-Silo-Idempotent-Replay") != "true" {
+	if replay.Code != http.StatusOK || replay.Header().Get("X-Vio-Idempotent-Replay") != "true" {
 		t.Fatalf("wrapped replay = %d header %q: %s",
-			replay.Code, replay.Header().Get("X-Silo-Idempotent-Replay"), replay.Body.String())
+			replay.Code, replay.Header().Get("X-Vio-Idempotent-Replay"), replay.Body.String())
 	}
 	if !bytes.Equal(bytes.TrimSpace(first.Body.Bytes()), bytes.TrimSpace(replay.Body.Bytes())) {
 		t.Fatalf("wrapped replay body = %s, want %s", replay.Body.String(), first.Body.String())
@@ -370,7 +370,7 @@ func TestNavigationShortcutConcurrentSameMutationID(t *testing.T) {
 				switch rec.Code {
 				case http.StatusOK:
 					successes = append(successes, bytes.TrimSpace(rec.Body.Bytes()))
-					if rec.Header().Get("X-Silo-Idempotent-Replay") == "true" {
+					if rec.Header().Get("X-Vio-Idempotent-Replay") == "true" {
 						replays++
 					}
 				case http.StatusConflict:
@@ -1280,7 +1280,7 @@ func TestMutationIDMakesWritesIdempotent(t *testing.T) {
 	if replay.Code != http.StatusOK {
 		t.Fatalf("replay = %d: %s", replay.Code, replay.Body.String())
 	}
-	if replay.Header().Get("X-Silo-Idempotent-Replay") != "true" {
+	if replay.Header().Get("X-Vio-Idempotent-Replay") != "true" {
 		t.Error("a repeated mutation id was not reported as a replay")
 	}
 
@@ -1417,7 +1417,7 @@ func TestFailedWritesLeaveNoReceipt(t *testing.T) {
 	if retry.Code != http.StatusOK {
 		t.Fatalf("retry after failure = %d: %s", retry.Code, retry.Body.String())
 	}
-	if retry.Header().Get("X-Silo-Idempotent-Replay") == "true" {
+	if retry.Header().Get("X-Vio-Idempotent-Replay") == "true" {
 		t.Error("the retry was served as a replay of the failed attempt")
 	}
 }

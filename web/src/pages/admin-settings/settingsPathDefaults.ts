@@ -27,11 +27,11 @@ export const DEFAULT_FFMPEG_PATH = "/usr/lib/jellyfin-ffmpeg/ffmpeg";
  * It is a *sibling* of the transcode directory, never a child: the transcode
  * sweep deletes every non-active subdirectory of its own root.
  */
-const DOWNLOAD_ARTIFACT_DIR_NAME = "silo-download-artifacts";
+const DOWNLOAD_ARTIFACT_DIR_NAME = "vio-download-artifacts";
 
 /**
  * Where prepared downloads are written for a given pair of stored settings —
- * the configured directory when set, otherwise a `silo-download-artifacts`
+ * the configured directory when set, otherwise a `vio-download-artifacts`
  * sibling of the (possibly defaulted) transcode directory.
  *
  * Pass the raw stored or staged strings: this mirrors

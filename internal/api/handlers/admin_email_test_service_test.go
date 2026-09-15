@@ -27,7 +27,7 @@ func TestAdminEmailSingleSendAndSafeFailure(t *testing.T) {
 	sender := &adminTestEmailSender{}
 	h := NewEmailHandler(sender)
 	result, err := h.SendAdminTestEmail(t.Context(), "recipient@example.test")
-	if err != nil || !result.OK || sender.calls != 1 || len(sender.message.To) != 1 || sender.message.To[0] != "recipient@example.test" || sender.message.Subject != "Silo test email" || sender.message.HTMLBody == "" {
+	if err != nil || !result.OK || sender.calls != 1 || len(sender.message.To) != 1 || sender.message.To[0] != "recipient@example.test" || sender.message.Subject != "Vio test email" || sender.message.HTMLBody == "" {
 		t.Fatal(result, err, sender)
 	}
 	_, err = h.SendAdminTestEmail(t.Context(), "invalid recipient")

@@ -299,9 +299,9 @@ func TestGenerateFullManifestCompactsRepeatedAuthenticationQuery(t *testing.T) {
 	}
 	for _, want := range []string{
 		"#EXT-X-VERSION:8",
-		"#EXT-X-DEFINE:NAME=\"silo_query\",VALUE=\"" + rawQuery + "\"",
-		"segment/seg_00000.ts?{$silo_query}",
-		"segment/seg_00299.ts?{$silo_query}",
+		"#EXT-X-DEFINE:NAME=\"vio_query\",VALUE=\"" + rawQuery + "\"",
+		"segment/seg_00000.ts?{$vio_query}",
+		"segment/seg_00299.ts?{$vio_query}",
 	} {
 		if !strings.Contains(manifest, want) {
 			t.Fatalf("manifest missing %q", want)

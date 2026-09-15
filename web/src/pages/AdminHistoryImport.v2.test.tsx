@@ -45,8 +45,8 @@ const mapping = {
   source_id: "1",
   external_user_id: "external",
   external_user_name: "External",
-  silo_user_id: "1",
-  silo_profile_id: "profile",
+  vio_user_id: "1",
+  vio_profile_id: "profile",
 };
 function reply(options: unknown, body: unknown, etag = '"initial"') {
   (options as { onResponse?: (r: Response) => void })?.onResponse?.(

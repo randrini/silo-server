@@ -133,7 +133,7 @@ func TestRouterReportsDisabledCompatWebAssets(t *testing.T) {
 				"jellyfin_compat.enabled":     "true",
 				"jellyfin_compat.web_enabled": "false",
 			},
-			wantBody: "Jellyfin Web UI is disabled in Silo settings",
+			wantBody: "Jellyfin Web UI is disabled in Vio settings",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

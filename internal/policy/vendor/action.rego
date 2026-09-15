@@ -1,11 +1,11 @@
-package silo.action
+package vio.action
 
-import data.silo.lib.quality
-import data.silo.lib.ratings
+import data.vio.lib.quality
+import data.vio.lib.ratings
 import rego.v1
 
 decision := tightened if {
-	override := data.silo_custom.action.override(base_decision, input)
+	override := data.vio_custom.action.override(base_decision, input)
 	tightened := tighten(base_decision, override, input)
 } else := base_decision
 

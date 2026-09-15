@@ -1,4 +1,4 @@
-package silo.lib.ratings
+package vio.lib.ratings
 
 import rego.v1
 

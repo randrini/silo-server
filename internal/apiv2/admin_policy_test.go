@@ -23,7 +23,7 @@ type fakeAdminPolicy struct {
 }
 
 func newFakeAdminPolicy() *fakeAdminPolicy {
-	return &fakeAdminPolicy{document: policy.Document{ID: 1, Revision: 1, Domain: "scope", Enabled: true, Name: "Fixture policy", CreatedAt: fixedTime(), UpdatedAt: fixedTime()}, version: policy.Version{ID: 2, DocumentID: 1, VersionNumber: 1, RegoSource: "package silo_custom.scope\nimport rego.v1\noverride(base, _) := base", SourceSHA256: strings.Repeat("a", 64), CompiledOK: true, CreatedAt: fixedTime()}}
+	return &fakeAdminPolicy{document: policy.Document{ID: 1, Revision: 1, Domain: "scope", Enabled: true, Name: "Fixture policy", CreatedAt: fixedTime(), UpdatedAt: fixedTime()}, version: policy.Version{ID: 2, DocumentID: 1, VersionNumber: 1, RegoSource: "package vio_custom.scope\nimport rego.v1\noverride(base, _) := base", SourceSHA256: strings.Repeat("a", 64), CompiledOK: true, CreatedAt: fixedTime()}}
 }
 func (f *fakeAdminPolicy) AdminPolicyReady(editor, _, _ bool) error {
 	if editor && f.editorDisabled {

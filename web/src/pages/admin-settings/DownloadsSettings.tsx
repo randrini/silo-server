@@ -151,7 +151,7 @@ export default function DownloadsSettings() {
             <PathSettingField
               label="Prepared file directory"
               defaultValue={derivedArtifactDir}
-              description="Leave blank for a silo-download-artifacts folder beside the transcode directory."
+              description="Leave blank for a vio-download-artifacts folder beside the transcode directory."
               value={form.getValue("download.artifact_dir")}
               onChange={(v) => form.setValue("download.artifact_dir", v)}
               restartRequired={restartKeys.has("download.artifact_dir")}

@@ -1,9 +1,9 @@
-package silo.permission
+package vio.permission
 
 import rego.v1
 
 decision := tightened if {
-	override := data.silo_custom.permission.override(base_decision, input)
+	override := data.vio_custom.permission.override(base_decision, input)
 	tightened := tighten(base_decision, override)
 } else := base_decision
 

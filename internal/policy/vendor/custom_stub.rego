@@ -1,4 +1,4 @@
-package silo_custom.scope
+package vio_custom.scope
 
 import rego.v1
 

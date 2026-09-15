@@ -1,4 +1,4 @@
-package silo_custom.permission
+package vio_custom.permission
 
 import rego.v1
 

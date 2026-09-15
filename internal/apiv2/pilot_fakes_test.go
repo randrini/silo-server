@@ -713,12 +713,12 @@ func (f *fakeSettingValuesSeam) identity(req handlers.SettingIdentityRequest) (h
 			v.DeviceID = req.Device.DeviceID
 		}
 		if v.DeviceID == "" {
-			return handlers.SettingValueView{}, settingAPIError(400, "bad_request", "device_header", "X-Silo-Device-Id header is required for a device override")
+			return handlers.SettingValueView{}, settingAPIError(400, "bad_request", "device_header", "X-Vio-Device-Id header is required for a device override")
 		}
 	}
 	if req.Scope == "profile_client" {
 		if req.ClientFamily == "" {
-			return handlers.SettingValueView{}, settingAPIError(400, "bad_request", "client_family", "X-Silo-Client-Family header must be one of tv, mobile, tablet, desktop or web")
+			return handlers.SettingValueView{}, settingAPIError(400, "bad_request", "client_family", "X-Vio-Client-Family header must be one of tv, mobile, tablet, desktop or web")
 		}
 		v.ClientFamily = req.ClientFamily
 	}

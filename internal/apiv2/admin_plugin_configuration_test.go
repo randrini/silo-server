@@ -127,7 +127,7 @@ func TestAdminPluginBindingWrites(t *testing.T) {
 	h, _ := pluginConfigurationHandler(f)
 	base := Prefix + "/admin/plugins/installations/7/"
 	rec := do(t, h, "PUT", base+"auth-binding", `{"capability_id":"oidc","enabled":true,"display_order":3,"auto_provision":true,"default_login":false}`, actingRequestAdmin)
-	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 || rec.Header().Get("X-Silo-Restart-Required") != "true" || f.lastID != 7 || f.lastAuth != (handlers.PluginAuthBindingInput{CapabilityID: "oidc", Enabled: true, DisplayOrder: 3, AutoProvision: true, DefaultLogin: false}) {
+	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 || rec.Header().Get("X-Vio-Restart-Required") != "true" || f.lastID != 7 || f.lastAuth != (handlers.PluginAuthBindingInput{CapabilityID: "oidc", Enabled: true, DisplayOrder: 3, AutoProvision: true, DefaultLogin: false}) {
 		t.Fatal(rec.Code, rec.Header(), f.lastAuth)
 	}
 	requireProblem(t, do(t, h, "PUT", base+"auth-binding", `{"capability_id":" ","enabled":true,"display_order":0,"auto_provision":false,"default_login":false}`, actingRequestAdmin), TypeValidationFailed)

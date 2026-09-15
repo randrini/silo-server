@@ -145,7 +145,7 @@ func TestBootstrapRejectsDifferentSelectedDatabase(t *testing.T) {
 
 func TestBootstrapUsesCustomPDPAndCurrentPIN(t *testing.T) {
 	s, actor, pool, provider := serviceFixture(t)
-	engine, err := policy.NewEngineWithCustom(t.Context(), map[string]policy.ActiveSource{"scope": {Source: `package silo_custom.scope
+	engine, err := policy.NewEngineWithCustom(t.Context(), map[string]policy.ActiveSource{"scope": {Source: `package vio_custom.scope
 import rego.v1
 override(_, _) := {"profile_verified": false}
 `}})

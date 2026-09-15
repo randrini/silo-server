@@ -842,7 +842,7 @@ func TestPollOnceAdvancesMarkerWhenPathsReturnedButNoneResolve(t *testing.T) {
 	if event.ChangesReturned != 2 || event.ChangesResolved != 0 || event.TargetsClaimed != 0 {
 		t.Fatalf("event counts = %+v", event)
 	}
-	if !strings.Contains(event.ErrorMessage, "none matched a Silo library folder") {
+	if !strings.Contains(event.ErrorMessage, "none matched a Vio library folder") {
 		t.Fatalf("event message = %q", event.ErrorMessage)
 	}
 	if event.MarkerAfter != "m1" {

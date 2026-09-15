@@ -53,7 +53,7 @@ func TestQueueUnavailableAndStaleSamplesOmitValues(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, family := range families {
-			if family.GetName() == "silo_queue_items" {
+			if family.GetName() == "vio_queue_items" {
 				t.Fatal("stale or unavailable queue appeared healthy")
 			}
 		}
@@ -62,7 +62,7 @@ func TestQueueUnavailableAndStaleSamplesOmitValues(t *testing.T) {
 	sample.at = time.Now()
 	sample.available = true
 	s.samples["scan"] = sample
-	if count := testutil.CollectAndCount(s, "silo_queue_items"); count != 1 {
+	if count := testutil.CollectAndCount(s, "vio_queue_items"); count != 1 {
 		t.Fatalf("fresh sample missing: %d", count)
 	}
 }

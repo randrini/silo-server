@@ -129,7 +129,7 @@ func TestCollectorExposesNothingWhenUnavailable(t *testing.T) {
 	s.goos = "darwin"
 	s.sample(context.Background())
 
-	if values := gatherNames(t, s); len(values) != 2 || values["silo_resource_sample_available"] != 0 || values["silo_resource_sample_stale"] != 1 {
+	if values := gatherNames(t, s); len(values) != 2 || values["vio_resource_sample_available"] != 0 || values["vio_resource_sample_stale"] != 1 {
 		t.Fatalf("scrape returned %v on an unsampled host, want only unavailable/stale health", values)
 	}
 }

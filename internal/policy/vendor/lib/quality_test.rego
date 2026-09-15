@@ -1,4 +1,4 @@
-package silo.lib.quality
+package vio.lib.quality
 
 import rego.v1
 

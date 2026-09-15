@@ -797,7 +797,7 @@ func fixtureCases() []fixtureCase {
 			method:   http.MethodPut, path: "/api/v2/settings/device/subtitle-appearance", body: `{"value":"{}"}`,
 			status: http.StatusUnauthorized, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: problem},
 		{name: "update_subtitle_appearance_device_override_device_header_required", operationID: "updateSubtitleAppearanceDeviceOverride",
-			scenario: "A device override has no meaning without a device: X-Silo-Device-Id is a required header, refused as a validation failure (v1 answered 400).",
+			scenario: "A device override has no meaning without a device: X-Vio-Device-Id is a required header, refused as a validation failure (v1 answered 400).",
 			method:   http.MethodPut, path: "/api/v2/settings/device/subtitle-appearance", headers: profileOwner(), body: `{"value":"{}"}`,
 			status: http.StatusUnprocessableEntity, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: problem},
 		{name: "get_effective_subtitle_appearance_ok", operationID: "getEffectiveSubtitleAppearance",

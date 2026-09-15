@@ -13,41 +13,41 @@ describe("effectiveDownloadArtifactDir", () => {
   });
 
   it("derives a sibling of the default transcode dir when both are blank", () => {
-    expect(effectiveDownloadArtifactDir("", "")).toBe("/tmp/silo-download-artifacts");
+    expect(effectiveDownloadArtifactDir("", "")).toBe("/tmp/vio-download-artifacts");
     expect(effectiveDownloadArtifactDir("", DEFAULT_TRANSCODE_DIR)).toBe(
-      "/tmp/silo-download-artifacts",
+      "/tmp/vio-download-artifacts",
     );
   });
 
   it("follows a custom transcode dir", () => {
     expect(effectiveDownloadArtifactDir("", "/mnt/fast/transcode")).toBe(
-      "/mnt/fast/silo-download-artifacts",
+      "/mnt/fast/vio-download-artifacts",
     );
-    expect(effectiveDownloadArtifactDir("", "/transcode")).toBe("/silo-download-artifacts");
+    expect(effectiveDownloadArtifactDir("", "/transcode")).toBe("/vio-download-artifacts");
   });
 
   it("still derives the sibling for a trailing-slash transcode dir", () => {
     // Nesting inside the transcode root would put prepared downloads where the
     // orphaned-transcode sweep deletes them; the server cleans the path first.
     expect(effectiveDownloadArtifactDir("", "/mnt/fast/transcode/")).toBe(
-      "/mnt/fast/silo-download-artifacts",
+      "/mnt/fast/vio-download-artifacts",
     );
-    expect(effectiveDownloadArtifactDir("", "/")).toBe("/silo-download-artifacts");
+    expect(effectiveDownloadArtifactDir("", "/")).toBe("/vio-download-artifacts");
   });
 
   it("cleans the derived path the way filepath.Join does", () => {
     expect(effectiveDownloadArtifactDir("", "/mnt//fast/transcode")).toBe(
-      "/mnt/fast/silo-download-artifacts",
+      "/mnt/fast/vio-download-artifacts",
     );
     expect(effectiveDownloadArtifactDir("", "/mnt/fast/../transcode")).toBe(
-      "/mnt/silo-download-artifacts",
+      "/mnt/vio-download-artifacts",
     );
   });
 
   it("stays relative for relative input, like the server would", () => {
     expect(effectiveDownloadArtifactDir("", "relative/transcode")).toBe(
-      "relative/silo-download-artifacts",
+      "relative/vio-download-artifacts",
     );
-    expect(effectiveDownloadArtifactDir("", "transcode")).toBe("silo-download-artifacts");
+    expect(effectiveDownloadArtifactDir("", "transcode")).toBe("vio-download-artifacts");
   });
 });

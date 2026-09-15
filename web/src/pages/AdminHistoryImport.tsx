@@ -690,8 +690,8 @@ function DiscoverDialog({
         source_id: source.id,
         external_user_id: mappingTarget.id,
         external_user_name: mappingTarget.name,
-        silo_user_id: Number(userId),
-        silo_profile_id: profileId,
+        vio_user_id: Number(userId),
+        vio_profile_id: profileId,
       },
       {
         onSuccess: () => {
@@ -1121,11 +1121,11 @@ function MappingsSection({
                   </TableCell>
                   <TableCell>
                     <p className="text-sm">
-                      {users.find((user) => user.id === m.silo_user_id)?.username ||
-                        `User ${m.silo_user_id}`}
+                      {users.find((user) => user.id === m.vio_user_id)?.username ||
+                        `User ${m.vio_user_id}`}
                     </p>
-                    {m.silo_profile_name && (
-                      <p className="text-muted-foreground text-xs">{m.silo_profile_name}</p>
+                    {m.vio_profile_name && (
+                      <p className="text-muted-foreground text-xs">{m.vio_profile_name}</p>
                     )}
                   </TableCell>
 

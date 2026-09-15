@@ -619,8 +619,8 @@ func TestFallbackResolveStaleVirtualSourcePersistsSubstituteMetadata(t *testing.
 	if savedFileID != file.ID {
 		t.Fatalf("metadata saved for file %d, want %d", savedFileID, file.ID)
 	}
-	if savedPath != substitute.URI {
-		t.Fatalf("metadata saved with path %q, want %q", savedPath, substitute.URI)
+	if savedPath != file.FilePath {
+		t.Fatalf("metadata saved with path %q, want stale CAS expected %q", savedPath, file.FilePath)
 	}
 	if !bytes.Contains(savedAudio, []byte("eac3")) || !bytes.Contains(savedAudio, []byte("eng")) {
 		t.Fatalf("saved audio tracks = %s, want probed eac3/eng inventory", savedAudio)

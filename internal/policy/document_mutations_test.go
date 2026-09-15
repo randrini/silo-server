@@ -345,7 +345,7 @@ func TestPolicyGuardedConstraintsRollbackRevisionAndGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	slow := `package silo_custom.scope
+	slow := `package vio_custom.scope
 import rego.v1
 override(base, _) := base if {
  count([x | some i in numbers.range(1,10000); some j in numbers.range(1,10000); x := i+j]) > 0

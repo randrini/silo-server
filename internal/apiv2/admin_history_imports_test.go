@@ -238,7 +238,7 @@ func TestAdminHistoryCreationLocationsAndInputValidation(t *testing.T) {
 	h := adminHistoryHandler(f)
 	cases := []struct{ path, body, location string }{
 		{"/admin/history-import-sources", `{"name":"Source","source_type":"emby","base_url":"https://source.example.test","enabled":true,"sort_order":0}`, "/admin/history-import-sources/1"},
-		{"/admin/history-imports/mappings", `{"source_id":"1","external_user_id":"external","external_user_name":"Example","silo_user_id":"3","silo_profile_id":"profile"}`, "/admin/history-imports/mappings/2"},
+		{"/admin/history-imports/mappings", `{"source_id":"1","external_user_id":"external","external_user_name":"Example","vio_user_id":"3","vio_profile_id":"profile"}`, "/admin/history-imports/mappings/2"},
 	}
 	for _, c := range cases {
 		r := do(t, h, http.MethodPost, Prefix+c.path, c.body, actingRequestAdmin)
@@ -247,7 +247,7 @@ func TestAdminHistoryCreationLocationsAndInputValidation(t *testing.T) {
 		}
 	}
 	requireProblem(t, do(t, h, http.MethodPut, Prefix+"/admin/history-import-sources/1", `{"admin_token":null}`, with(actingRequestAdmin, "If-Match", "*")), TypeValidationFailed)
-	requireProblem(t, do(t, h, http.MethodPost, Prefix+"/admin/history-imports/mappings", `{"source_id":1,"external_user_id":"external","external_user_name":"Example","silo_user_id":"3","silo_profile_id":"profile"}`, actingRequestAdmin), TypeValidationFailed)
+	requireProblem(t, do(t, h, http.MethodPost, Prefix+"/admin/history-imports/mappings", `{"source_id":1,"external_user_id":"external","external_user_name":"Example","vio_user_id":"3","vio_profile_id":"profile"}`, actingRequestAdmin), TypeValidationFailed)
 }
 
 func (f *fakeAdminHistoryImports) DiscoverExternalUsers(context.Context, int) ([]historyimport.ExternalUser, error) {

@@ -171,7 +171,7 @@ func customModulePath(domain string) string {
 }
 
 // Domains for admin-authored policy documents. Each maps to one
-// silo_custom.<domain> package consulted by the matching vendor module.
+// vio_custom.<domain> package consulted by the matching vendor module.
 const (
 	DomainScope      = "scope"
 	DomainPermission = "permission"

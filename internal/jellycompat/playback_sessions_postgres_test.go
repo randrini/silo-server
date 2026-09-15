@@ -22,7 +22,7 @@ func TestNegotiatedSessionAdvisoryLockKeyIsPinnedAndSeparatesRepresentativeInput
 	t.Parallel()
 
 	baseline := negotiatedSessionAdvisoryLockKey("token", "device", "route")
-	const wantBaseline int64 = -2277851018424744338
+	const wantBaseline int64 = 8604409013579845891
 	if baseline != wantBaseline {
 		t.Fatalf("key = %d, want pinned value %d", baseline, wantBaseline)
 	}

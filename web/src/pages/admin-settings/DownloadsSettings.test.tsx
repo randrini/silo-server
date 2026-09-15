@@ -217,11 +217,11 @@ describe("DownloadsSettings prepared file directory", () => {
 
     expect(screen.getByLabelText("Prepared file directory")).toHaveAttribute(
       "placeholder",
-      "/tmp/silo-download-artifacts",
+      "/tmp/vio-download-artifacts",
     );
     expect(
       screen.getByText(
-        "Leave blank for a silo-download-artifacts folder beside the transcode directory.",
+        "Leave blank for a vio-download-artifacts folder beside the transcode directory.",
       ),
     ).toBeInTheDocument();
   });
@@ -237,7 +237,7 @@ describe("DownloadsSettings prepared file directory", () => {
 
     expect(screen.getByLabelText("Prepared file directory")).toHaveAttribute(
       "placeholder",
-      "/mnt/fast/silo-download-artifacts",
+      "/mnt/fast/vio-download-artifacts",
     );
   });
 
